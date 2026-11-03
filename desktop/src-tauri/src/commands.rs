@@ -3,6 +3,7 @@ use crate::keystore;
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::os::windows::process::CommandExt;
 use tauri::{AppHandle, State};
 
 #[tauri::command]
@@ -338,7 +339,7 @@ pub async fn install_update(app: AppHandle, url: String) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let bat = std::env::temp_dir().join("esmeringhoy-update.cmd");
     let script = format!(
-        "@echo off\r\n\"{}\" /S\r\nstart \"\" \"{}\"\r\n",
+        "@echo off\r\n\"{}\" /S\r\nping -n 7 127.0.0.1 >nul\r\nstart \"\" \"{}\"\r\n",
         setup.display(),
         exe.display()
     );
@@ -346,6 +347,7 @@ pub async fn install_update(app: AppHandle, url: String) -> Result<(), String> {
     std::process::Command::new("cmd")
         .arg("/C")
         .arg(&bat)
+        .creation_flags(0x08000000)
         .spawn()
         .map_err(|e| e.to_string())?;
     app.exit(0);

@@ -2918,12 +2918,17 @@ $('#updNow').addEventListener('click', async () => {
   if (!url) return;
   if (btn.dataset.install) {
     btn.disabled = true;
-    btn.textContent = 'Downloading…';
+    btn.textContent = 'Updating…';
+    $('#updLater').hidden = true;
+    $('#updNotes').hidden = true;
+    $('#updLead').textContent = 'Downloading the update. Esmeringhoy closes and reopens by itself once it is installed.';
     try {
       await invoke('install_update', { url });
     } catch {
       btn.disabled = false;
       btn.textContent = 'Update & restart';
+      $('#updLater').hidden = false;
+      $('#updLead').textContent = 'A newer version is available. Your settings and cached tracks are kept.';
       toast('Update failed');
     }
     return;
