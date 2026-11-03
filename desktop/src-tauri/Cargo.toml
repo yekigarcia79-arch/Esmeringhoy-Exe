@@ -1,0 +1,37 @@
+[package]
+name = "esmeringhoy"
+version = "1.0.0"
+description = "Esmeringhoy — standalone desktop music player"
+authors = ["Esmeringhoy"]
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
+rodio = { version = "0.23", default-features = false, features = [
+  "playback",
+  "symphonia-isomp4",
+  "symphonia-aac",
+  "symphonia-wav",
+  "symphonia-pcm",
+  "symphonia-flac",
+  "symphonia-mp3",
+  "symphonia-ogg",
+  "symphonia-vorbis",
+] }
+futures-util = "0.3"
+keyring = "4"
+anyhow = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true

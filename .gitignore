@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Rust build output
+desktop/src-tauri/target/
+**/target/
+
+# Tauri generated files
+desktop/src-tauri/gen/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+
+# Installer artifacts
+*.msi
+*.exe
+*.dmg
+*.appimage
+
+# Local secrets
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+
+# Wrangler local state (backend lives in the web repo, but just in case)
+.wrangler/
+
+# Runtime cache (audio) if ever opened from the repo root
+cache/
