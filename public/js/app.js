@@ -2717,7 +2717,6 @@ async function submitCode() {
     apply(data.state);
     connectStream();
     loadCatalog();
-    setTimeout(() => checkForUpdates(false), 5000);
     if (data.created) toast('New account created for that address');
     $('#authCode').value = '';
     codeSent = false;
@@ -2790,7 +2789,6 @@ $('#authForm').addEventListener('submit', async (e) => {
     if (snap) apply(snap);
     connectStream();
     loadCatalog();
-    setTimeout(() => checkForUpdates(false), 5000);
     $('#authPass').value = '';
     $('#authPass2').value = '';
     $('#authEmail').value = '';

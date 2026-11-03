@@ -336,9 +336,16 @@ pub async fn install_update(app: AppHandle, url: String) -> Result<(), String> {
     let setup = std::env::temp_dir().join("Esmeringhoy-update-setup.exe");
     std::fs::write(&setup, &bytes).map_err(|e| e.to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let script = format!("\"{}\" /S && start \"\" \"{}\"", setup.display(), exe.display());
+    let bat = std::env::temp_dir().join("esmeringhoy-update.cmd");
+    let script = format!(
+        "@echo off\r\n\"{}\" /S\r\nstart \"\" \"{}\"\r\n",
+        setup.display(),
+        exe.display()
+    );
+    std::fs::write(&bat, script).map_err(|e| e.to_string())?;
     std::process::Command::new("cmd")
-        .args(["/C", &script])
+        .arg("/C")
+        .arg(&bat)
         .spawn()
         .map_err(|e| e.to_string())?;
     app.exit(0);
