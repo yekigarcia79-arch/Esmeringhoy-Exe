@@ -12,7 +12,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/css/styles.css?v=20261103f">
+<link rel="stylesheet" href="/css/styles.css?v=20261103g">
 <link rel="icon" type="image/png" sizes="64x64" href="/img/icon.png">
 <link rel="apple-touch-icon" href="/img/icon-180.png">
 </head>
@@ -339,6 +339,25 @@
   </div>
 </div>
 
+<div class="modal" id="updModal" hidden>
+  <div class="modal-backdrop" id="updBackdrop"></div>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="updTitle">
+    <header class="sheet-head">
+      <div>
+        <p class="eyebrow">Update</p>
+        <h2 id="updTitle">Esmeringhoy <span id="updVersion"></span></h2>
+      </div>
+      <button class="icon-btn" id="updClose" aria-label="Close"><svg class="ic"><use href="#i-close"/></svg></button>
+    </header>
+    <p class="sheet-note">A newer version is available. Your settings and cached tracks are kept.</p>
+    <div class="upd-notes" id="updNotes" hidden></div>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="updLater" type="button">Later</button>
+      <button class="btn primary" id="updNow" type="button">Update &amp; restart</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="setModal" hidden>
   <div class="modal-backdrop" id="setBackdrop"></div>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="setTitle">
@@ -370,6 +389,16 @@
       <div class="meter" aria-hidden="true"><span id="cacheBar"></span></div>
     </section>
 
+    <section class="set-block">
+      <div class="set-row">
+        <div>
+          <div class="set-label">Version</div>
+          <p class="set-note" id="setVersion">—</p>
+        </div>
+        <button class="btn sm" id="setCheck" type="button">Check for updates</button>
+      </div>
+    </section>
+
     <p class="sheet-note">The cache lives in your local app data, apart from the program files — updating or reinstalling never removes it.</p>
   </div>
 </div>
@@ -398,6 +427,6 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script type="module" src="/js/app.js?v=20261103l"></script>
+<script type="module" src="/js/app.js?v=20261103m"></script>
 </body>
 </html>

@@ -2819,3 +2819,13 @@ body.is-fullscreen { --win-r: 0px; }
   background: var(--ink);
   transition: width 280ms var(--ease-out);
 }
+
+.upd-notes {
+  margin: 14px 0 4px;
+  max-height: 168px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-3);
+  white-space: pre-wrap;
+}

@@ -251,6 +251,112 @@ pub fn cache_set_limit(state: State<'_, Arc<AppState>>, gb: u64) -> Result<Value
     }))
 }
 
+const UPDATE_REPO: &str = "yekigarcia79-arch/Esmeringhoy-Exe";
+
+fn version_tuple(v: &str) -> [u64; 3] {
+    let mut out = [0u64; 3];
+    for (i, part) in v.trim_start_matches('v').split('.').take(3).enumerate() {
+        out[i] = part.parse().unwrap_or(0);
+    }
+    out
+}
+
+fn is_newer(remote: &str, local: &str) -> bool {
+    version_tuple(remote) > version_tuple(local)
+}
+
+fn can_self_update() -> bool {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    if local.is_empty() {
+        return false;
+    }
+    let exe = exe.to_string_lossy().to_lowercase();
+    let want = format!("{}\\esmeringhoy\\", local.to_lowercase());
+    exe.starts_with(&want)
+}
+
+#[tauri::command]
+pub async fn check_update() -> Result<Value, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("Esmeringhoy-Desktop")
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let res = client
+        .get(format!("https://api.github.com/repos/{UPDATE_REPO}/releases/latest"))
+        .header("accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if res.status() == 404 {
+        return Ok(json!({ "available": false }));
+    }
+    if !res.status().is_success() {
+        return Err(format!("GitHub answered HTTP {}", res.status()));
+    }
+    let body: Value = res.json().await.map_err(|e| e.to_string())?;
+    let tag = body.get("tag_name").and_then(|v| v.as_str()).unwrap_or("");
+    let url = body
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .and_then(|arr| {
+            arr.iter().find(|a| {
+                a.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.to_lowercase().ends_with("-setup.exe"))
+                    .unwrap_or(false)
+            })
+        })
+        .and_then(|a| a.get("browser_download_url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    Ok(json!({
+        "available": !url.is_empty() && is_newer(tag, env!("CARGO_PKG_VERSION")),
+        "version": tag.trim_start_matches('v'),
+        "notes": body.get("body").and_then(|v| v.as_str()).unwrap_or(""),
+        "url": url,
+        "canInstall": can_self_update(),
+    }))
+}
+
+#[tauri::command]
+pub async fn install_update(app: AppHandle, url: String) -> Result<(), String> {
+    if !can_self_update() {
+        return Err("this copy was not installed by the setup".into());
+    }
+    if !url.starts_with("https://github.com/") {
+        return Err("unexpected update source".into());
+    }
+    let res = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("download failed: HTTP {}", res.status()));
+    }
+    let bytes = res.bytes().await.map_err(|e| e.to_string())?;
+    let setup = std::env::temp_dir().join("Esmeringhoy-update-setup.exe");
+    std::fs::write(&setup, &bytes).map_err(|e| e.to_string())?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let script = format!("\"{}\" /S && start \"\" \"{}\"", setup.display(), exe.display());
+    std::process::Command::new("cmd")
+        .args(["/C", &script])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err("only https links".into());
+    }
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn app_health(state: State<'_, Arc<AppState>>) -> Value {
     json!({

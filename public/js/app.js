@@ -2323,7 +2323,8 @@ document.addEventListener('keydown', (e) => {
     $('#q').focus();
   }
   if (e.key === 'Escape') {
-    if (!$('#setModal').hidden) closeSettings();
+    if (!$('#updModal').hidden) closeUpdate();
+    else if (!$('#setModal').hidden) closeSettings();
     else if (!$('#acctModal').hidden) closeAcctModal();
     else if (!$('#srcModal').hidden) closeSourceModal();
     else if (!$('#plModal').hidden) closePlaylistModal();
@@ -2716,6 +2717,7 @@ async function submitCode() {
     apply(data.state);
     connectStream();
     loadCatalog();
+    setTimeout(() => checkForUpdates(false), 5000);
     if (data.created) toast('New account created for that address');
     $('#authCode').value = '';
     codeSent = false;
@@ -2788,6 +2790,7 @@ $('#authForm').addEventListener('submit', async (e) => {
     if (snap) apply(snap);
     connectStream();
     loadCatalog();
+    setTimeout(() => checkForUpdates(false), 5000);
     $('#authPass').value = '';
     $('#authPass2').value = '';
     $('#authEmail').value = '';
@@ -2851,6 +2854,7 @@ function openSettings() {
   $('#userBtn').setAttribute('aria-expanded', 'false');
   $('#setModal').hidden = false;
   refreshCacheStats();
+  refreshVersion();
 }
 
 function closeSettings() {
@@ -2870,6 +2874,73 @@ $('#cacheLimit').addEventListener('click', async (e) => {
   try { await invoke('cache_set_limit', { gb: Number(b.dataset.gb) }); } catch {}
   refreshCacheStats();
 });
+
+const UPDATE_SKIP_KEY = 'esm.skipUpdate';
+
+async function checkForUpdates(manual = false) {
+  try {
+    const info = await invoke('check_update');
+    if (!info?.available) {
+      if (manual) toast('Esmeringhoy is up to date');
+      return;
+    }
+    if (!manual && sessionStorage.getItem(UPDATE_SKIP_KEY) === info.version) return;
+    showUpdate(info);
+  } catch {
+    if (manual) toast('Could not check for updates');
+  }
+}
+
+function showUpdate(info) {
+  $('#updVersion').textContent = info.version || '';
+  const notes = (info.notes || '').trim();
+  const box = $('#updNotes');
+  box.textContent = notes.slice(0, 800);
+  box.hidden = !notes;
+  const now = $('#updNow');
+  now.dataset.url = info.url || '';
+  now.dataset.install = info.canInstall ? '1' : '';
+  now.textContent = info.canInstall ? 'Update & restart' : 'Open download page';
+  $('#updModal').hidden = false;
+}
+
+function closeUpdate() {
+  $('#updModal').hidden = true;
+}
+
+$('#updClose').addEventListener('click', closeUpdate);
+$('#updBackdrop').addEventListener('click', closeUpdate);
+$('#updLater').addEventListener('click', () => {
+  sessionStorage.setItem(UPDATE_SKIP_KEY, $('#updVersion').textContent || '');
+  closeUpdate();
+});
+$('#updNow').addEventListener('click', async () => {
+  const btn = $('#updNow');
+  const url = btn.dataset.url;
+  if (!url) return;
+  if (btn.dataset.install) {
+    btn.disabled = true;
+    btn.textContent = 'Downloading…';
+    try {
+      await invoke('install_update', { url });
+    } catch {
+      btn.disabled = false;
+      btn.textContent = 'Update & restart';
+      toast('Update failed');
+    }
+    return;
+  }
+  try { await invoke('open_url', { url }); } catch {}
+});
+
+async function refreshVersion() {
+  try {
+    const h = await invoke('app_health');
+    $('#setVersion').textContent = `Esmeringhoy ${h?.version || ''}`;
+  } catch {}
+}
+
+$('#setCheck').addEventListener('click', () => checkForUpdates(true));
 
 $('#cacheClear').addEventListener('click', async () => {
   try {
@@ -2944,6 +3015,7 @@ async function boot() {
 
     connectStream();
     loadCatalog();
+    setTimeout(() => checkForUpdates(false), 5000);
   } catch {
     $('#view').innerHTML = `<div class="empty"><div class="big">Server not reachable</div><div>Check your connection — the app could not reach the Esmeringhoy server.</div></div>`;
   } finally {

@@ -41,6 +41,9 @@ fn main() {
             commands::cache_stats,
             commands::cache_set_limit,
             commands::app_health,
+            commands::check_update,
+            commands::install_update,
+            commands::open_url,
             commands::api_base,
             commands::web_log,
         ])
