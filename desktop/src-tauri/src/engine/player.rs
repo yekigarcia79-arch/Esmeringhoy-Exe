@@ -178,9 +178,42 @@ impl Engine {
         cache: &Arc<TrackCache>,
         video_id: &str,
     ) -> Result<PathBuf> {
-        // The signed-URL path would expire mid-download; the plain stream
-        // endpoint needs no minting and answers with the whole file.
+        // The plain path needs no minting: download the whole file, then
+        // decode from disk. Two sources, same sink: 1) direct resolution
+        // from this machine's egress (the Cloudflare Workers' datacenter
+        // IPs are bot-flagged by YouTube → playabilityStatus=LOGIN_REQUIRED);
+        // 2) the backend relay as a fallback for resolutions the Workers
+        //    already hold cached.
         let dest = cache.path_for(video_id, "m4a");
+
+        // 1) Direct resolution, bytes Google → this machine.
+        match crate::youtube::resolve(video_id).await {
+            Ok(res) => {
+                let mut last_emit = 0u64;
+                let bytes = api
+                    .download_url(&res.url, &dest, |written, total| {
+                        if written.saturating_sub(last_emit) >= 256 * 1024 {
+                            last_emit = written;
+                            let _ = app.emit(
+                                LOADING_EVENT,
+                                json!({
+                                    "videoId": video_id,
+                                    "progress": total.map(|t| written as f64 / t as f64).unwrap_or(-1.0),
+                                }),
+                            );
+                        }
+                    })
+                    .await?;
+                cache.record(video_id, "m4a", bytes);
+                return Ok(dest);
+            }
+            Err(_) => {
+                // Fall through to the relay silently; if that also fails,
+                // load_and_play surfaces the error like any other failure.
+            }
+        }
+
+        // 2) Fallback: backend relay.
         let mut last_emit = 0u64;
         let bytes = api
             .download_to_file(

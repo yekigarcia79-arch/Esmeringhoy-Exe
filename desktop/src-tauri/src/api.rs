@@ -102,6 +102,34 @@ impl ApiClient {
             let body = res.text().await.unwrap_or_default();
             return Err(anyhow!("download failed: HTTP {code} {}", body.trim()));
         }
+        Ok(Self::stream_to_file(res, dest, on_progress).await?.0)
+    }
+
+    /// Download an absolute url (e.g. a googlevideo link signed for this
+    /// machine's IP) to disk with progress callbacks.
+    pub async fn download_url(
+        &self,
+        url: &str,
+        dest: &Path,
+        on_progress: impl FnMut(u64, Option<u64>),
+    ) -> Result<u64> {
+        let res = self.http.get(url).send().await.context("download request failed")?;
+        let status = res.status();
+        if !status.is_success() {
+            let code = status.as_u16();
+            let body = res.text().await.unwrap_or_default();
+            return Err(anyhow!("download failed: HTTP {code} {}", body.trim()));
+        }
+        Ok(Self::stream_to_file(res, dest, on_progress).await?.0)
+    }
+
+    /// Shared sink: stream a successful response into `dest` (via a .part
+    /// file, renamed on completion) and report (bytes written, total).
+    async fn stream_to_file(
+        res: reqwest::Response,
+        dest: &Path,
+        mut on_progress: impl FnMut(u64, Option<u64>),
+    ) -> Result<(u64, Option<u64>)> {
         let total = res.content_length();
 
         if let Some(parent) = dest.parent() {
@@ -111,7 +139,6 @@ impl ApiClient {
         let mut file = tokio::fs::File::create(&tmp).await.context("creating part file")?;
         let mut written: u64 = 0;
         let mut stream = res.bytes_stream();
-        let mut on_progress = on_progress;
         use tokio::io::AsyncWriteExt;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("download stream broke")?;
@@ -122,7 +149,7 @@ impl ApiClient {
         file.flush().await?;
         drop(file);
         tokio::fs::rename(&tmp, dest).await.context("committing download")?;
-        Ok(written)
+        Ok((written, total))
     }
 
 }

@@ -15,7 +15,8 @@ server live in a separate repository (`Esmeringhoy-main`, deployed to
 
 | Area | State |
 |---|---|
-| Rust audio engine (download → decode → cpal, LRU cache, seek, end-of-track cascade) | Built; engine smoke-tested on this machine |
+| Rust audio engine (download → decode → cpal, LRU cache, seek, end-of-track cascade) | Built; engine flow verified end-to-end against local backend |
+| Direct InnerTube resolution from this machine (Workers egress is bot-flagged; home egress is not) | Built & live-tested (itag 140, OK) |
 | IPC bridge (all API calls route through Rust; token in Windows Credential Manager) | Built & verified |
 | Password sign-in / register / silent relaunch / sign-out | Built & verified against a local backend |
 | Full web UI port (home, search, mix, playlists, queue, lyrics, art/album pages, import) | Ported; module + DOM verified error-free in Chromium |
@@ -101,6 +102,7 @@ Esmeringhoy Application/
         ├── commands.rs     the IPC surface (auth_*, engine_*, api_call, web_log)
         ├── api.rs          reqwest client; token never reaches the webview
         ├── keystore.rs     Windows Credential Manager
+        ├── youtube.rs      Direct InnerTube resolution (visitorData + VISIONOS itag 140/139)
         ├── cache.rs        1 GB LRU track cache (%LOCALAPPDATA%\dev.esmeringhoy.desktop\cache)
         ├── engine/player.rs download → Symphonia decode → cpal output;
         │                   end-of-track → POST /api/cmd "ended" (server cascade)
@@ -111,6 +113,10 @@ Design rules:
 
 - **The server decides what plays next** (queue → repeat-all → radio); the
   desktop only renders the snapshot and plays the bytes.
+- **Streams resolve from this machine** — YouTube answers Cloudflare Workers'
+  datacenter IPs with `playabilityStatus=LOGIN_REQUIRED`, so audio is
+  resolved directly (`youtube.rs`) and downloads go Google → this machine.
+  The backend relay (`/api/stream?codec=aac`) is the fallback.
 - **Tracks are cached locally** (~1 GB LRU) — seeks are file seeks, replays
   are offline.
 - **All `/api` traffic goes through Rust**; the webview never sees the

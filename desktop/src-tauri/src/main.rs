@@ -8,6 +8,7 @@ mod commands;
 mod engine;
 mod keystore;
 mod state;
+mod youtube;
 
 use state::AppState;
 use std::sync::Arc;
