@@ -28,6 +28,8 @@
   --r-md: 10px;
   --r-lg: 14px;
 
+  --win-r: 14px;
+
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
   --t-fast: 130ms;
   --t: 200ms;
@@ -127,8 +129,6 @@ html.booting .app { opacity: 0; }
   letter-spacing: 0.01em;
 }
 
-/* The mark is a portrait, so it sits on the text's optical centre rather than
-   its baseline, and it is round — a square crop of a face reads as a badge. */
 .brand-logo {
   width: 30px;
   height: 30px;
@@ -277,14 +277,22 @@ html.booting .app { opacity: 0; }
 
 .search:focus-within .hint { opacity: 0; }
 
-.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+.topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: none;
+}
 
 .status {
   font: 400 10.5px/1 var(--font-mono);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--ink-3);
-  max-width: 300px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 260px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -512,7 +520,6 @@ html {
 .btn.ghost { border-color: transparent; color: var(--ink-3); }
 .btn.ghost:hover { border-color: var(--line); color: var(--ink); }
 
-/* Held state: following an artist, a toggle that stays on. */
 .btn.on {
   color: var(--ink);
   border-color: var(--line-3);
@@ -741,7 +748,6 @@ html {
 
 .chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 
-/* Loading a playlist out of a file */
 .pl-load {
   max-width: 560px;
   border: 1px solid var(--line);
@@ -1019,8 +1025,6 @@ html {
 .mini-bar { height: 2px; background: var(--line-2); margin-top: 14px; border-radius: 2px; overflow: hidden; }
 .mini-bar i { display: block; height: 100%; background: var(--ink); width: 0; transition: width 240ms linear; }
 
-/* Artwork on the left, lyrics on the right. The cover sticks while the words
-   scroll, so you can still see what is playing when you are reading. */
 .lyrics-wrap {
   max-width: 1080px;
   margin: 0 auto;
@@ -1031,7 +1035,6 @@ html {
   align-items: start;
 }
 
-/* The empty state and the video-off notice are one column of prose. */
 .lyrics-wrap.single { display: block; max-width: 720px; }
 
 .lyr-side { position: sticky; top: 6px; }
@@ -1102,10 +1105,6 @@ html {
 .lyr-line.past { color: #8f8f8f; }
 .lyr-line.now { color: var(--ink); transform: scale(1.04); }
 
-/* Karaoke fill: the active line is painted by a gradient clipped to the glyphs,
-   and --p (set per frame from the line's own timing) decides how much of it has
-   turned white. Declared inside @supports so a browser without background-clip
-   keeps the plain white line above instead of transparent text. */
 @supports ((-webkit-background-clip: text) or (background-clip: text)) {
   .lyr-line.now {
     color: transparent;
@@ -1162,7 +1161,6 @@ button.lyr-line:active { transform: scale(0.995); }
 
 .np-big img { width: 100%; height: 100%; object-fit: cover; }
 
-/* The picture replaces the artwork, so the frame goes 16:9 to match it. */
 .np-video-wrap {
   position: relative;
   aspect-ratio: 16 / 9;
@@ -1255,8 +1253,6 @@ button.lyr-line:active { transform: scale(0.995); }
 .np-art img { width: 100%; height: 100%; object-fit: cover; }
 .np-art img:not([src]) { visibility: hidden; }
 
-/* The bar preview is a 16:9 picture inside a square button, so it letterboxes
-   into a small rectangle rather than cropping the frame. */
 .np-art video {
   width: 100%;
   height: 100%;
@@ -1265,8 +1261,6 @@ button.lyr-line:active { transform: scale(0.995); }
   background: #000;
 }
 
-/* In video mode the button itself becomes the rectangle, so the picture fills
-   it instead of shrinking into a letterboxed sliver inside a square. */
 .np-art.is-video {
   width: auto;
   aspect-ratio: 16 / 9;
@@ -1427,7 +1421,7 @@ input[type="range"]:hover::-moz-range-thumb { opacity: 1; }
 
 #seek { flex: 1; }
 
-.user { position: relative; }
+.user { position: relative; flex: none; }
 
 .user-btn {
   display: inline-flex;
@@ -2107,10 +2101,6 @@ input[type="range"]:hover::-moz-range-thumb { opacity: 1; }
   .app { grid-template-rows: auto 1fr var(--player); }
   .body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
 
-  /* The bar is two rows on a phone: brand and account above, search across the
-     full width below. One row left the input ~60px wide, and the suggestion
-     panel is anchored to it, so the history list inherited that width and
-     every row came out clipped. */
   .topbar {
     flex-wrap: wrap;
     gap: 0 12px;
@@ -2136,9 +2126,6 @@ input[type="range"]:hover::-moz-range-thumb { opacity: 1; }
   .search .ic { width: 18px; height: 18px; }
   .search input { font-size: 16px; }
 
-  /* Full-bleed, edge to edge. The panel is anchored to .search, so any future
-     squeeze on the input would clip the history list again; bleeding by the
-     page padding pins it to the viewport instead. */
   .sug {
     left: calc(-1 * var(--pad));
     right: calc(-1 * var(--pad));
@@ -2337,12 +2324,6 @@ body.is-playing .np-art::after { opacity: 1; }
   .hero-art { display: none; }
 }
 
-/* The artwork behind the page drifts instead of sitting still — a slow loop,
-   like a very gentle Ken Burns. It lives on .ambient rather than .on because
-   the two layers are crossfaded on every track change: the outgoing one has to
-   keep drifting through its 900 ms fade, or it snaps back to its base scale
-   halfway through and the crossfade jumps. Transform only, so the work stays on
-   the compositor and the 56px blur is painted once. */
 @keyframes ambient-drift {
   0%   { transform: scale(1.50) translate3d(-7%, -5%, 0); }
   25%  { transform: scale(1.60) translate3d(3%, -7%, 0); }
@@ -2351,11 +2332,6 @@ body.is-playing .np-art::after { opacity: 1; }
   100% { transform: scale(1.50) translate3d(-7%, -5%, 0); }
 }
 
-/* Panning is invisible when the artwork is one flat colour: there is no texture
-   to watch move, so a blurred red cover looks frozen however far it travels.
-   This highlight carries its own structure, so the background reads as alive
-   whatever is playing. It sits inside .ambient, which means it inherits the
-   blur and fades with the layer on a track change. */
 @keyframes ambient-sheen {
   0%   { transform: translate3d(-24%, -15%, 0) scale(1); }
   33%  { transform: translate3d(19%, 11%, 0) scale(1.2); }
@@ -2567,15 +2543,7 @@ body:not(.is-playing) .eq i { animation-play-state: paused; }
   .view > *, .cards .card, .rows .row, .tile, body.is-playing .play-btn, .eq i {
     animation: none !important;
   }
-  /* The background keeps drifting even here. It is a very low-frequency,
-     low-contrast wash behind everything rather than content moving, and it is
-     the one thing the site was asked to do. Everything else still stops.
 
-     The duration and iteration count have to be restated with !important: the
-     global `*` reset earlier in this file sets animation-duration to 0.01ms
-     with !important, which collapses any animation to a single instant. A
-     plain .ambient rule cannot win against that, which is why the drift looked
-     dead on a machine with animation effects switched off. */
   .ambient {
     transition: none;
     animation-duration: 20s !important;
@@ -2692,4 +2660,162 @@ body:not(.is-playing) .eq i { animation-play-state: paused; }
   10%, 90% { transform: translateX(-2px); }
   30%, 70% { transform: translateX(4px); }
   50%      { transform: translateX(-6px); }
+}
+
+html { background: transparent; }
+
+body {
+  position: relative;
+  background: transparent;
+  border-radius: var(--win-r);
+  overflow: hidden;
+}
+
+.shell {
+  position: relative;
+  height: 100dvh;
+  background: var(--bg);
+  border-radius: var(--win-r);
+  overflow: hidden;
+}
+
+.app { height: 100%; }
+
+.ambient,
+body::after { position: absolute; }
+
+body::after { border-radius: var(--win-r); }
+
+.auth,
+.gate,
+.captcha,
+.modal-backdrop { border-radius: var(--win-r); }
+
+body::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 9999;
+  border-radius: var(--win-r);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.075);
+  pointer-events: none;
+}
+
+.topbar { padding-right: 148px; }
+
+.win-controls {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 10000;
+  display: flex;
+  height: 30px;
+  border: 1px solid var(--line-2);
+  border-radius: 9px;
+  overflow: hidden;
+  background: rgba(6, 6, 6, 0.5);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+.win-btn {
+  width: 38px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  border-radius: 0;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+
+.win-btn + .win-btn { border-left: 1px solid var(--line); }
+
+.win-btn svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.win-btn:hover { background: rgba(255, 255, 255, 0.10); color: var(--ink); }
+.win-btn:active { background: rgba(255, 255, 255, 0.16); }
+.win-btn-close:hover { background: #c42b1c; color: #fff; }
+.win-btn-close:active { background: #b02a1b; }
+
+#winFull .ic-min { display: none; }
+body.is-fullscreen #winFull .ic-max { display: none; }
+body.is-fullscreen #winFull .ic-min { display: block; }
+
+body.is-fullscreen { --win-r: 0px; }
+
+.set-block {
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+}
+
+.set-block:first-of-type { border-top: 0; padding-top: 2px; }
+
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.set-label {
+  font: 500 11px/1 var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.set-note {
+  margin-top: 8px;
+  max-width: 36ch;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink-3);
+}
+
+.set-row .set-note { margin-top: 6px; }
+
+.seg {
+  display: inline-flex;
+  margin-top: 14px;
+  padding: 3px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.seg-item {
+  padding: 7px 18px;
+  border-radius: 999px;
+  font: 500 12px/1 var(--font-mono);
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  transition: color var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease);
+}
+
+.seg-item:hover { color: var(--ink); }
+.seg-item.on { background: var(--ink); color: var(--black); }
+
+.meter {
+  margin-top: 12px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.meter span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ink);
+  transition: width 280ms var(--ease-out);
 }

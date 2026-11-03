@@ -32,3 +32,6 @@ Thumbs.db
 
 # Runtime cache (audio) if ever opened from the repo root
 cache/
+
+# WorkBuddy project memory (local, not source)
+.workbuddy-ai/

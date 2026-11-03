@@ -1,8 +1,5 @@
 import { parsePlaylistExport } from './spotify.js';
 
-// ---- desktop bridge ---------------------------------------------------------
-// The webview talks to Rust, never to the network directly. All /api calls
-// go over IPC; the session token lives in the OS credential manager.
 const invoke = (...a) => {
   const t = window.__TAURI__;
   if (!t?.core?.invoke) throw new Error('Tauri IPC unavailable');
@@ -18,7 +15,6 @@ window.addEventListener('unhandledrejection', (e) => {
   try { invoke('web_log', { message: `[rejection] ${e.reason}` }); } catch {}
 });
 
-/// Response-compatible wrapper over the IPC api_call command.
 async function netFetch(path, opts = {}) {
   const method = (opts.method || 'GET').toUpperCase();
   let body = null;
@@ -97,7 +93,6 @@ function setPath(path, { replace = false } = {}) {
   else history.pushState({ path }, '', path);
 }
 
-// The server owns the view, so a click both moves the URL and asks for it.
 function go(view) {
   if (!me) {
     showAuth('login');
@@ -132,7 +127,6 @@ window.addEventListener('popstate', () => {
   if (!S || S.view !== view) send('setView', { view });
 });
 
-
 const esc = (s) =>
   String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
@@ -159,17 +153,65 @@ function letterTile(seed) {
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
-const thumbUrl = (name) => `/api/thumb?name=${encodeURIComponent(name)}`;
+const artistThumbs = new Map();
+const thumbInflight = new Set();
+const thumbQueue = [];
+let thumbRunning = 0;
+const THUMB_PARALLEL = 3;
 
-// YouTube hands out =w120-h120 thumbnails, which is a three-fold upscale in the
-// Now view. The same asset is served at any size, so ask for one that matches
-// where it lands — rows stay cheap, the big art does not turn to mush.
+async function loadArtistThumb(name) {
+  if (artistThumbs.has(name)) return artistThumbs.get(name);
+  if (thumbInflight.has(name)) return '';
+  thumbInflight.add(name);
+  try {
+    const url = (await invoke('artist_thumb', { name })) || '';
+    if (url) artistThumbs.set(name, url);
+    return url;
+  } catch {
+    return '';
+  } finally {
+    thumbInflight.delete(name);
+  }
+}
+
+function pumpThumbs() {
+  while (thumbRunning < THUMB_PARALLEL && thumbQueue.length) {
+    const job = thumbQueue.shift();
+    thumbRunning++;
+    Promise.resolve()
+      .then(job)
+      .catch(() => {})
+      .finally(() => { thumbRunning--; pumpThumbs(); });
+  }
+}
+
+function hydrateArtistThumbs(root) {
+  for (const img of root.querySelectorAll('img[data-thumb]')) {
+    const name = img.dataset.thumb;
+    if (!name) continue;
+    if (artistThumbs.has(name)) {
+      img.src = artistThumbs.get(name);
+      img.removeAttribute('data-thumb');
+      continue;
+    }
+    thumbQueue.push(async () => {
+      const url = await loadArtistThumb(name);
+      if (url && img.isConnected) {
+        img.src = url;
+        img.removeAttribute('data-thumb');
+      }
+    });
+  }
+  pumpThumbs();
+}
+
 const thumbAt = (url, size) =>
   String(url || '').replace(/=w\d+-h\d+/, `=w${size}-h${size}`);
 
-function art(url, seed, cls = '', size = 0) {
+function art(url, seed, cls = '', size = 0, thumbName = '') {
   const src = url ? (size ? thumbAt(url, size) : url) : letterTile(seed);
-  return `<img class="${cls}" src="${esc(src)}" alt="" aria-hidden="true" loading="lazy" decoding="async" data-seed="${esc(seed || '')}">`;
+  const thumb = thumbName ? ` data-thumb="${esc(thumbName)}"` : '';
+  return `<img class="${cls}" src="${esc(src)}" alt="" aria-hidden="true" loading="lazy" decoding="async" data-seed="${esc(seed || '')}"${thumb}>`;
 }
 
 document.addEventListener(
@@ -208,15 +250,8 @@ async function send(cmd, extra = {}, opts = {}) {
   }
 }
 
-// ---- engine bridge -----------------------------------------------------------
-// Rust owns the audio (download → decode → cpal output). `audio` is a
-// read-mostly shim that keeps the ported UI's clock semantics; mutations
-// (seek, volume) are forwarded to the engine.
 const audio = {
   _pos: 0, _dur: 0, _paused: true, _ended: false,
-  // Interpolation anchor: position events arrive at ~2.5 Hz; the fill and
-  // progress bar must move every frame, so the shim advances them locally
-  // between events while the track is playing.
   _at: 0,
   get currentTime() {
     if (this._paused || !this._at) return this._pos;
@@ -242,6 +277,11 @@ let engineTrackId = '';
 let engineSeq = -1;
 let pendingSeek = null;
 
+let enginePlayingId = '';
+let engineState = 'idle';
+let claimedId = '';
+let claimedAt = 0;
+
 function applyVolume(s) {
   const gain = Math.min(1, Number(s.gain) || 1);
   const target = Math.max(0, Math.min(1, (Number(s.volume) || 0) / 100 * gain));
@@ -262,11 +302,16 @@ async function loadEngineTrack(track, transport) {
   } catch (e) {
     try { invoke('web_log', { message: `[engine] load failed: ${e}` }); } catch {}
     toast(`Could not play that track: ${e}`);
+    enginePlayingId = '';
+    engineState = 'idle';
+    if (S && S.transport === 'loading') {
+      S.transport = 'paused';
+      send('transport', { state: 'paused' }, { silent: true });
+      try { renderPlayer(); } catch {}
+    }
   }
 }
 
-// The server owns playback; the engine follows the snapshot. A track loads
-// when it is new, or when playSeq moved (repeat-one replays the same one).
 function reconcileEngine(s) {
   if (!s) return;
   const cur = s.current;
@@ -277,7 +322,7 @@ function reconcileEngine(s) {
     const restarted = !fresh && seq !== engineSeq;
     engineTrackId = id;
     engineSeq = seq;
-    if (fresh || restarted) loadEngineTrack(cur, s.transport);
+    if (fresh || (restarted && s.transport === 'loading')) loadEngineTrack(cur, s.transport);
     else invoke('engine_set_transport', { transport: s.transport || 'idle' }).catch(() => {});
   } else if (engineTrackId) {
     engineTrackId = '';
@@ -287,7 +332,6 @@ function reconcileEngine(s) {
   applyVolume(s);
 }
 
-// Explicit transport change from the UI (video frame play/pause, lyric click).
 function setTransport(state) {
   if (S) S.transport = state;
   invoke('engine_set_transport', { transport: state }).catch(() => {});
@@ -296,8 +340,6 @@ function setTransport(state) {
 
 const videoSrcCache = new Map();
 
-// <video> cannot carry an Authorization header, so it plays from a signed
-// (5-minute, single-video) URL minted through the session.
 async function videoSrc(id, low) {
   const key = `${id}:${low ? 'low' : ''}`;
   const hit = videoSrcCache.get(key);
@@ -313,14 +355,36 @@ async function videoSrc(id, low) {
   return url;
 }
 
-// Engine → the UI (position for the lyric highlighter, body class, errors).
+function engineIsPlayingCurrent() {
+  return engineState === 'playing'
+    && !!S?.current?.videoId
+    && enginePlayingId === S.current.videoId;
+}
+
+function claimPlaying(videoId) {
+  if (!S || !videoId || S.current?.videoId !== videoId) return;
+  if (S.transport !== 'loading' && S.transport !== 'idle') return;
+  S.transport = 'playing';
+  const now = Date.now();
+  if (claimedId !== videoId || now - claimedAt >= 4000) {
+    claimedId = videoId;
+    claimedAt = now;
+    send('transport', { state: 'playing' }, { silent: true });
+  }
+  try { renderPlayer(); } catch {}
+}
+
 listen('player:position', (e) => {
   const p = e?.payload || {};
+  if (enginePlayingId && S?.current?.videoId && enginePlayingId !== S.current.videoId) return;
   audio._pos = Number(p.pos) || 0;
   audio._dur = Number(p.duration) || 0;
   audio._paused = p.state !== 'playing';
   audio._at = audio._paused ? 0 : performance.now();
+  if (p.state === 'paused') engineState = 'paused';
+  else if (p.state === 'playing') engineState = 'playing';
   document.body.classList.toggle('is-playing', p.state === 'playing');
+  if (p.state === 'playing' && enginePlayingId) claimPlaying(enginePlayingId);
 });
 listen('player:loading', (e) => {
   const p = e?.payload || {};
@@ -329,30 +393,69 @@ listen('player:loading', (e) => {
     try { renderChrome(); } catch {}
   }
 });
-listen('player:track-changed', () => { try { audio._pos = 0; audio._at = performance.now(); renderPlayer(); } catch {} });
+listen('player:track-changed', (e) => {
+  try {
+    const id = e?.payload?.track?.videoId || engineTrackId;
+    enginePlayingId = id;
+    engineState = 'playing';
+    audio._pos = 0;
+    audio._at = performance.now();
+    claimPlaying(id);
+    renderPlayer();
+    topUpQueue();
+  } catch {}
+});
+const QUEUE_LOW = 2;
+const QUEUE_TOPUP = 5;
+let toppingUp = false;
+const appendedIds = new Set();
+
+async function topUpQueue() {
+  if (toppingUp || !S?.current) return;
+  if ((Number(S.queueCount) || 0) > QUEUE_LOW) return;
+  const seed = S.current;
+  const q = [seed.artist, seed.title].filter(Boolean).join(' ').trim();
+  if (!q) return;
+  toppingUp = true;
+  try {
+    const res = await netFetch(`/api/v1/search?q=${encodeURIComponent(q)}`);
+    if (!res.ok) return;
+    const data = await res.json().catch(() => null);
+    const tracks = Array.isArray(data?.tracks) ? data.tracks : [];
+    const known = new Set([seed.videoId, ...(S.recent || []).map((t) => t.videoId), ...appendedIds]);
+    let added = 0;
+    for (const t of tracks) {
+      if (added >= QUEUE_TOPUP) break;
+      if (!t?.videoId || known.has(t.videoId)) continue;
+      known.add(t.videoId);
+      appendedIds.add(t.videoId);
+      await send('queueAppend', { track: t }, { silent: true });
+      added += 1;
+    }
+    if (added) send('transport', { state: 'playing' }, { silent: true });
+  } catch {
+  } finally {
+    toppingUp = false;
+  }
+}
+
 listen('player:error', (e) => toast(e?.payload?.message || 'Playback failed'));
-listen('player:idle', () => { if (S) { S.transport = 'idle'; try { renderPlayer(); } catch {} } });
+listen('player:idle', () => {
+  enginePlayingId = '';
+  engineState = 'idle';
+  if (S) { S.transport = 'idle'; try { renderPlayer(); } catch {} }
+});
 
 let scrubbing = false;
 
-// Video is the same track, different picture: a muted video stream played
-// against the audio element, which stays the clock and the sound.
 let videoMode = false;
 let videoEl = null;
 let barVideoEl = null;
 let videoBusy = false;
-// The track the frame was last mounted for. The bar tile has to follow the
-// track on every view, but renderView() only rebuilds when the view's own
-// signature changes — so the mount is also driven from apply().
 let videoMountedFor = '';
-// True while the native bar is being dragged: the drift correction has to stand
-// down, or it snaps the picture back to the audio clock mid-scrub.
 let videoSeeking = false;
 
-// Mode switches (Audio↔Video) carry the position to the new upload of the
-// same song — the pending seek is applied by the loader once the track
-// starts.
-let carryTo = ''; // kept for setVideoMode's stale-carry check
+let carryTo = '';
 
 function carryPosition(videoId) {
   const at = audio.currentTime || 0;
@@ -363,8 +466,6 @@ function carryPosition(videoId) {
 
 async function findVideo(t) {
   try {
-    // The id rules out the track's own art track (the cover encoded as a
-    // still); the duration tells a real video from the same recording.
     const q = new URLSearchParams({
       title: t.title || '',
       artist: t.artist || '',
@@ -392,8 +493,6 @@ async function findSong(t) {
   }
 }
 
-// Which song a music video was swapped in for, so Audio can put it back. Kept
-// in the tab so a reload mid-video still knows what to return to.
 const PAIR_KEY = 'esmVideoPair';
 
 function rememberPair(videoId, track) {
@@ -415,14 +514,10 @@ async function setVideoMode(on) {
   if (!on) {
     videoMode = false;
 
-    // Back to the song, not just back to the artwork: the video's audio is a
-    // different edit, so leaving it playing is not "audio mode".
     const cur = S?.current;
     if (cur && cur.video && !videoBusy) {
       let back = pairedAudio(cur.videoId);
 
-      // A video opened straight from an artist's shelf has no song recorded,
-      // so go and find one.
       if (!back) {
         videoBusy = true;
         toast('Finding the track…');
@@ -451,18 +546,12 @@ async function setVideoMode(on) {
   const cur = S?.current;
   if (!cur || videoBusy) return;
 
-  // A song search returns an art track — the album cover encoded as a still —
-  // so its "video" is a photo. Find the real music video and play that, which
-  // also keeps picture and sound on one timeline.
   if (!cur.video) {
     videoBusy = true;
     toast('Finding the video…');
     try {
       const mv = await findVideo(cur);
 
-      // Nothing ranked above the song itself: its "video" is the cover as a
-      // still. Switching would put a frozen picture in the frame, which is the
-      // thing this button exists to avoid, so say why and stay put.
       if (!mv || mv.videoId === cur.videoId) {
         toast('Could not find a music video for this track');
         return;
@@ -487,22 +576,11 @@ async function setVideoMode(on) {
   renderPlayer();
 }
 
-// The video element only exists while the Now view is on screen, so it is
-// mounted after each render and dropped when the view goes away. The bar keeps
-// a second, low-quality one so the thumbnail is live without pulling a second
-// 1080p stream.
-//
-// Called from renderView() and from apply() on every track change, so it has
-// to be idempotent: re-assigning the same src reloads the stream from zero,
-// which would stutter once per poll.
 function mountVideo() {
   const id = S?.current?.videoId;
   const now = $('#npVideo');
   const bar = $('#npBarVideo');
 
-  // The view is rebuilt from HTML, so the previous track's frame is a detached
-  // element rather than a reused one — and a detached <video> keeps its stream
-  // open until it is told to stop.
   if (videoEl && videoEl !== now) {
     videoEl.pause();
     videoEl.removeAttribute('src');
@@ -518,12 +596,8 @@ function mountVideo() {
       now.addEventListener('error', () => {
         if (!videoMode) return;
 
-        // A hidden tab drops this stream all the time — the decoder is
-        // throttled and the relayed response times out. That is not a track
-        // without a video, so nothing is decided until the tab is looked at.
         if (document.hidden) return;
 
-        // One quiet reopen first: a stale stream usually clears.
         if (!now.dataset.retried) {
           now.dataset.retried = '1';
           reopenVideo(now);
@@ -538,10 +612,6 @@ function mountVideo() {
         else if (now.webkitEnterFullscreen) now.webkitEnterFullscreen();
       });
 
-      // The native bar seeks the video, but the audio is the clock — so a seek
-      // here has to move the audio, or the next frame drags the video back.
-      // Our own drift correction lands within milliseconds of the audio, so
-      // anything further apart is a real seek.
       now.addEventListener('seeking', () => { videoSeeking = true; });
       now.addEventListener('seeked', () => {
         videoSeeking = false;
@@ -549,16 +619,12 @@ function mountVideo() {
         audio.currentTime = now.currentTime;
       });
 
-      // Full screen exposes play/pause too; mirror them so the sound follows
-      // the picture instead of carrying on underneath a frozen frame.
       let wasPlaying = false;
       now.addEventListener('playing', () => { wasPlaying = true; });
       now.addEventListener('play', () => {
         if (audio.paused) setTransport('playing');
       });
       now.addEventListener('pause', () => {
-        // Tearing the frame down calls pause() on an element that is already
-        // out of the document; that is not the listener pausing the song.
         if (!wasPlaying || !now.isConnected) return;
         wasPlaying = false;
         if (!audio.paused && !now.ended) setTransport('paused');
@@ -569,7 +635,6 @@ function mountVideo() {
 
   if (bar) {
     if (!videoMode || !id) {
-      // Off means no stream at all, not a hidden one still downloading.
       if (barVideoEl) barVideoEl.pause();
       if (bar.hasAttribute('src')) {
         bar.removeAttribute('src');
@@ -589,10 +654,6 @@ function mountVideo() {
   syncVideo();
 }
 
-// A hidden tab does not keep a relayed stream alive: the decoder is throttled
-// and the Worker's response can time out, leaving an element that play() just
-// rejects on. The audio is untouched, so the picture is reopened at the audio's
-// position instead of being dropped.
 function reopenVideo(el) {
   if (!el || !el.getAttribute('src')) return;
   const at = audio.currentTime || 0;
@@ -619,8 +680,6 @@ function reviveVideo() {
   syncVideo(true);
 }
 
-// The audio element is the clock. The video is muted and nudged back into
-// line when it drifts, rather than being seeked every frame.
 function syncVideo(force = false) {
   if (!videoMode || videoSeeking) return;
   for (const el of [videoEl, barVideoEl]) {
@@ -671,10 +730,6 @@ function apply(snap) {
 
   S = snap;
 
-  // Video mode belongs to the track that has a video. When the queue moves on
-  // to a song, the frame would show that song's cover as a still — a video
-  // frame whose picture does not move, and does not match what you hear.
-  // Dropping back to artwork is the honest thing.
   if (videoMode && S.current && !S.current.video) {
     videoMode = false;
     lastViewSig = '';
@@ -683,26 +738,24 @@ function apply(snap) {
   if ($('#sug') && !$('#sug').hidden) renderSuggestions();
 
   reconcileEngine(snap);
+
+  if (engineIsPlayingCurrent()) claimPlaying(S.current.videoId);
+
+  if (S.transport === 'paused' && S.current?.videoId && enginePlayingId === S.current.videoId) {
+    engineState = 'paused';
+  }
+
   renderChrome();
   renderGate();
-  // The bar is always on screen and the only thing showing what is playing, so
-  // it is painted before the view. A view renderer that throws used to leave it
-  // on the previous track's artwork while the new track played.
   renderPlayer();
   renderView();
 
-  // renderView() only rebuilds when the view's own signature changes, so on
-  // Home or Search the bar's video tile would keep the previous track's stream
-  // while the next track plays — the picture and the sound drift apart. Mount
-  // on a track change whatever the view did.
   const curId = snap.current?.videoId || '';
   if (curId !== videoMountedFor) {
     videoMountedFor = curId;
     mountVideo();
   }
 
-  // A command can change the view server-side (skip the gate, start a
-  // playlist), so the URL follows the snapshot rather than the other way round.
   if (routingReady && !authOpen) {
     const p = pathForView(S.view);
     if (location.pathname + location.search !== p) setPath(p, { replace: true });
@@ -759,9 +812,6 @@ function renderPlayer() {
   vb.textContent = videoMode ? 'Audio' : 'Video';
   vb.title = videoMode ? 'Back to the artwork' : 'Watch the video';
 
-  // The bar thumbnail becomes the video itself while video mode is on, and the
-  // button goes 16:9 so the picture fills it rather than shrinking inside a
-  // square.
   const barVid = $('#npBarVideo');
   const barImg = $('#npImg');
   const barArt = $('#npArt');
@@ -769,13 +819,15 @@ function renderPlayer() {
   if (barImg) barImg.hidden = videoMode && has;
   if (barArt) barArt.classList.toggle('is-video', videoMode && has);
 
-  $('#npArt').classList.toggle('playing', S.transport === 'playing');
+  $('#npArt').classList.toggle('playing', S.transport === 'playing' || engineIsPlayingCurrent());
 
   const playing = S.transport === 'playing';
-  const wantsPlay = playing || S.transport === 'loading';
+  const live = engineIsPlayingCurrent();
+  const loading = S.transport === 'loading' && !live;
+  const wantsPlay = playing || loading || live;
   const btn = $('#btnPlay');
   btn.classList.toggle('is-playing', wantsPlay);
-  btn.classList.toggle('is-loading', S.transport === 'loading');
+  btn.classList.toggle('is-loading', loading);
   btn.title = wantsPlay ? 'Pause' : 'Play';
   btn.setAttribute('aria-label', wantsPlay ? 'Pause' : 'Play');
 
@@ -838,7 +890,6 @@ function renderView() {
     case 'now': view.innerHTML = renderNowView(); break;
     default: view.innerHTML = renderHomeView(); break;
   }
-
 
   $('#content').scrollTop = scroll;
   mountVideo();
@@ -1017,8 +1068,6 @@ function renderArtistView() {
   const tracks = a?.tracks || [];
   const videos = a?.videos || [];
 
-  // Video cards index into the same list as the song rows, so one click
-  // handler plays either.
   viewList = [...tracks, ...videos];
   viewCtx = {};
 
@@ -1033,8 +1082,6 @@ function renderArtistView() {
   }
 
   const albums = a.albums || [];
-  // Following an artist is what puts their tracks in the mix, so the button
-  // reads the same list the mix is built from.
   const followed = (S?.selectedArtists || []).includes(a.name);
 
   return `
@@ -1161,8 +1208,6 @@ function skeletonRows(n) {
      <div class="sk" style="height:9px;width:28%;margin-top:7px"></div></div></div>`).join('');
 }
 
-// --- loading a playlist out of a file --------------------------------------
-
 let importBusy = false;
 let importAbort = false;
 
@@ -1180,8 +1225,6 @@ function importProgress(done, total, label) {
   if (bar) bar.style.width = `${pct}%`;
 }
 
-// A playlist file is matched ten rows at a time: every request stays short
-// enough to finish, and the page can show how far along it is.
 async function importPlaylistFile(file) {
   if (!file || importBusy) return;
 
@@ -1233,8 +1276,6 @@ async function importPlaylistFile(file) {
 
     importProgress(rows.length, rows.length, 'Saving…');
 
-    // A CSV carries no playlist name of its own; Exportify saves the file under
-    // the playlist's name, so the file name is the best guess.
     const name = file.name.replace(/\.[^.]+$/, '').trim().slice(0, 60) || 'From Spotify';
     const snap = await send('playlistImport', { name, tracks });
     const id = snap?.lastPlaylistId;
@@ -1261,8 +1302,6 @@ async function importPlaylistFile(file) {
   }
 }
 
-// The drop zone is rebuilt with the view, so the picker and the drag target are
-// handled at the document rather than bound per render.
 document.addEventListener('change', (e) => {
   if (e.target?.id === 'plFile') importPlaylistFile(e.target.files?.[0]);
 });
@@ -1339,7 +1378,7 @@ function renderPlaylistsView() {
 
     <div class="sec" style="margin-top:34px"><div>
       <h2>Load from Spotify</h2>
-      <p class="sub">Export any playlist with <a class="link" href="https://exportify.net" target="_blank" rel="noopener">Exportify</a>, then drop the CSV here. Each track is matched to something this player can stream.</p>
+      <p class="sub">Export any playlist with <a class="link" href="https:
     </div></div>
     <div class="pl-load" id="plLoad">
       <input type="file" id="plFile" accept=".csv,text/csv,.json,application/json,.txt" hidden>
@@ -1423,8 +1462,6 @@ function renderLyricsView() {
       <div class="lyr-empty">Play something and the lyrics arrive on their own.</div></div>`;
   }
 
-  // Watching the video means watching, not reading. Nothing here, and nothing
-  // on the Now view either.
   if (videoMode) {
     return `<div class="lyrics-wrap single">
       <div class="lyrics-head"><div><p class="eyebrow">Lyrics</p><h2>${esc(cur.title)}</h2></div></div>
@@ -1517,12 +1554,6 @@ let lastLyricIdx = -2;
 let userScrolledAt = 0;
 let glideRaf = 0;
 
-// Scroll the lyric column ourselves instead of asking for behavior:'smooth'.
-// The native version is a fixed ~300ms no matter how far the line has to
-// travel, so a line that jumps half a page lurches; and with reduced motion
-// on, `scroll-behavior: auto !important` in the stylesheet can override it
-// into an instant snap. This eases over a distance-scaled duration and can be
-// cancelled the moment the reader takes over.
 function glideTo(box, top) {
   cancelAnimationFrame(glideRaf);
   const from = box.scrollTop;
@@ -1532,8 +1563,6 @@ function glideTo(box, top) {
 
   const ms = Math.min(950, 420 + Math.abs(dist) * 0.6);
   const t0 = performance.now();
-  // Ease in and out: a pure ease-out front-loads the movement, which reads as
-  // a lurch on the first frame.
   const ease = (t) => (t < 0.5 ? 4 * t ** 3 : 1 - (-2 * t + 2) ** 3 / 2);
 
   const step = (now) => {
@@ -1575,9 +1604,6 @@ function updateLyricHighlight(force = false) {
     }
   }
 
-  // How far through the active line the song is. This runs every frame, not only
-  // when the line changes, so the white edge sweeps with the vocal instead of
-  // the whole line snapping to white.
   if (idx >= 0) {
     const line = lyr.lines[idx];
     const next = lyr.lines[idx + 1];
@@ -1618,12 +1644,14 @@ function renderGate() {
   $('#gateGrid').innerHTML = list.length
     ? list.map((a, i) => `
       <button class="tile ${sel.has(a.name) ? 'sel' : ''}" style="--i:${i}" data-artist="${esc(a.name)}" aria-pressed="${sel.has(a.name)}">
-        <span class="tile-art">${art(a.thumb || thumbUrl(a.name), a.name, '', 240)}<span class="tile-tick">${icon('check')}</span></span>
+        <span class="tile-art">${art(a.thumb || artistThumbs.get(a.name) || '', a.name, '', 240, a.name)}<span class="tile-tick">${icon('check')}</span></span>
         <span class="tile-name">${esc(a.name)}</span>
       </button>`).join('')
     : CAT.ready
       ? `<p class="gate-empty">No artists in this list right now. Try the other tab, or skip and search for anything.</p>`
       : skeletonTiles(12);
+
+  hydrateArtistThumbs($('#gateGrid'));
 
   $('#gateSum').textContent = S.selectedArtists.length
     ? `${S.selectedArtists.length} selected · ${S.perArtist} tracks each`
@@ -1973,6 +2001,39 @@ $('#sugList').addEventListener('click', (e) => {
   send('play', { track: t });
 });
 
+const appWindow = window.__TAURI__?.window?.getCurrentWindow?.();
+$('#winMin')?.addEventListener('click', () => { try { appWindow?.minimize?.(); } catch {} });
+$('#winClose')?.addEventListener('click', () => { try { appWindow?.close?.(); } catch {} });
+
+async function setFullscreen(on) {
+  try {
+    await appWindow?.setFullscreen?.(on);
+    document.body.classList.toggle('is-fullscreen', on);
+    const btn = $('#winFull');
+    btn?.setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (btn) btn.title = on ? 'Leave fullscreen' : 'Fullscreen';
+  } catch {}
+}
+
+$('#winFull')?.addEventListener('click', async () => {
+  let on = false;
+  try { on = !(await appWindow?.isFullscreen?.()); } catch {}
+  setFullscreen(on);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !document.body.classList.contains('is-fullscreen')) return;
+  setFullscreen(false);
+});
+
+for (const el of document.querySelectorAll('.topbar, .auth, .gate')) {
+  el.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest('button, a, input, select, textarea, label, .search, .user, .sug')) return;
+    try { appWindow?.startDragging?.(); } catch {}
+  });
+}
+
 $('#btnPlay').addEventListener('click', () => send('togglePlay'));
 $('#btnNext').addEventListener('click', () =>
   send('next', { pos: audio.currentTime || 0, dur: audio.duration || 0 }));
@@ -1983,7 +2044,6 @@ $('#btnPrev').addEventListener('click', () => {
 $('#btnShuffle').addEventListener('click', () => send('shuffle'));
 $('#btnRepeat').addEventListener('click', () => send('repeat'));
 
-// The two views worth reaching without leaving the bar.
 $('#btnQueue').addEventListener('click', () => go('queue'));
 $('#btnLyrics').addEventListener('click', () => go('lyrics'));
 
@@ -2263,7 +2323,8 @@ document.addEventListener('keydown', (e) => {
     $('#q').focus();
   }
   if (e.key === 'Escape') {
-    if (!$('#acctModal').hidden) closeAcctModal();
+    if (!$('#setModal').hidden) closeSettings();
+    else if (!$('#acctModal').hidden) closeAcctModal();
     else if (!$('#srcModal').hidden) closeSourceModal();
     else if (!$('#plModal').hidden) closePlaylistModal();
     else if (!$('#sug').hidden) hideSuggestions();
@@ -2361,7 +2422,14 @@ function setAuthMode(mode) {
 
 function setUser(user) {
   me = user || null;
-  $('#userName').textContent = me ? me.username : '—';
+  let name = me?.username || '';
+  if (me && !name) {
+    try { name = localStorage.getItem('esm.username') || ''; } catch {}
+  }
+  if (me && name) {
+    try { localStorage.setItem('esm.username', name); } catch {}
+  }
+  $('#userName').textContent = me ? (name || '—') : '—';
   $('#userWrap').hidden = !me;
 }
 
@@ -2453,9 +2521,6 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   if (pollTimer) pollOnce();
 
-  // The picture does not reliably survive a hidden tab: the stream stalls while
-  // the audio keeps going. Pick it up again at the audio's position rather than
-  // leaving a dead frame behind the title.
   reviveVideo();
 });
 
@@ -2754,6 +2819,66 @@ document.addEventListener('click', () => {
   $('#userBtn').setAttribute('aria-expanded', 'false');
 });
 
+function fmtBytes(n) {
+  const bytes = Math.max(0, Number(n) || 0);
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  const gb = bytes / (1024 * 1024 * 1024);
+  if (gb >= 1) return `${gb.toFixed(gb >= 10 ? 0 : 1)} GB`;
+  return `${Math.round(bytes / (1024 * 1024))} MB`;
+}
+
+async function refreshCacheStats() {
+  try {
+    const s = await invoke('cache_stats');
+    const used = Number(s?.usedBytes) || 0;
+    const limit = Number(s?.limitBytes) || 0;
+    const tracks = Number(s?.tracks) || 0;
+    const usage = $('#cacheUsage');
+    if (usage) usage.textContent = `${fmtBytes(used)} of ${fmtBytes(limit)} used · ${tracks} track${tracks === 1 ? '' : 's'} cached`;
+    const bar = $('#cacheBar');
+    if (bar) bar.style.width = `${limit ? Math.min(100, (used / limit) * 100) : 0}%`;
+    const gb = limit ? Math.round(limit / (1024 * 1024 * 1024)) : 5;
+    document.querySelectorAll('#cacheLimit .seg-item').forEach((b) => {
+      const on = Number(b.dataset.gb) === gb;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+  } catch {}
+}
+
+function openSettings() {
+  $('#userMenu').classList.remove('on');
+  $('#userBtn').setAttribute('aria-expanded', 'false');
+  $('#setModal').hidden = false;
+  refreshCacheStats();
+}
+
+function closeSettings() {
+  $('#setModal').hidden = true;
+}
+
+$('#settingsBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  openSettings();
+});
+$('#setClose').addEventListener('click', closeSettings);
+$('#setBackdrop').addEventListener('click', closeSettings);
+
+$('#cacheLimit').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-gb]');
+  if (!b) return;
+  try { await invoke('cache_set_limit', { gb: Number(b.dataset.gb) }); } catch {}
+  refreshCacheStats();
+});
+
+$('#cacheClear').addEventListener('click', async () => {
+  try {
+    const freed = await invoke('cache_clear');
+    toast(`Freed ${fmtBytes(freed || 0)}`);
+  } catch {}
+  refreshCacheStats();
+});
+
 $('#logoutBtn').addEventListener('click', async () => {
   try { await invoke('auth_sign_out'); } catch {}
   signOutLocally();
@@ -2762,9 +2887,6 @@ $('#logoutBtn').addEventListener('click', async () => {
   $('#authPass2').value = '';
 });
 
-// The desktop is a first-party app: no anti-bot challenge, only the
-// registration mode (invite/closed) the server advertises, so the auth
-// screen can show the invite field before it is needed.
 async function runGate() {
   try {
     const res = await netFetch('/api/gate');
@@ -2776,7 +2898,6 @@ async function runGate() {
   return true;
 }
 
-
 async function boot() {
   try {
     API_BASE = await invoke('api_base').catch(() => '');
@@ -2784,7 +2905,6 @@ async function boot() {
   try {
     await runGate();
 
-    // Silent sign-in: the OS keychain holds the session token; Rust validates it.
     const restored = await invoke('auth_restore').catch(() => null);
     if (!restored?.signedIn) {
       setUser(null);
@@ -2793,15 +2913,15 @@ async function boot() {
     }
     setUser(restored.user || { username: '' });
 
-    const res = await netFetch('/api/state');
-    if (res.status === 401) {
+    const st = await readInitialState();
+    if (st?.auth) {
       showAuth(authModeForPath(location.pathname) || 'login');
       return;
     }
-    if (res.ok) apply(await res.json());
+    if (st?.snap) apply(st.snap);
+    else $('#view').innerHTML = `<div class="empty"><div class="big">Connecting…</div><div>Waiting for the Esmeringhoy server — retrying in the background.</div></div>`;
     routingReady = true;
 
-    // A deep link outranks whatever view was left in the player document.
     if (S) {
       const wanted = viewForPath(location.pathname);
       const artistId = artistIdFromPath(location.pathname);
@@ -2829,6 +2949,18 @@ async function boot() {
   } finally {
     document.documentElement.classList.remove('booting');
   }
+}
+
+async function readInitialState(attempts = 4) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await netFetch('/api/state');
+      if (res.status === 401) return { auth: true };
+      if (res.ok) return { snap: await res.json() };
+    } catch {}
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+  }
+  return null;
 }
 
 setUser(null);

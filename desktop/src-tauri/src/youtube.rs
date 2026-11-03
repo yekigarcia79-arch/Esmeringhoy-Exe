@@ -1,10 +1,3 @@
-//! Direct InnerTube audio resolution. The desktop resolves tracks from the
-//! user's own machine: YouTube answers the Cloudflare Workers'
-//! datacenter IPs with `playabilityStatus=LOGIN_REQUIRED` ("Sign in to
-//! confirm you're not a bot"), so the backend relay is only a fallback, not
-//! the primary path. Same resolution algorithm the open-source player uses,
-//! ported to Rust.
-
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -13,12 +6,11 @@ use std::time::Duration;
 
 const UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-const ITAG_AAC: [u64; 2] = [140, 139]; // Symphonia decodes these; Opus itags are skipped.
+const ITAG_AAC: [u64; 2] = [140, 139];
 
 #[derive(Clone, Debug)]
 pub struct Resolved {
     pub url: String,
-    // Kept for unit tests and future diagnostics; the engine downloads `url` only.
     #[allow(dead_code)]
     pub itag: u32,
     #[allow(dead_code)]
@@ -63,8 +55,6 @@ async fn api(path: &str, body: &Value, client_name: u64, client_version: &str, e
     res.json().await.with_context(|| format!("InnerTube {path} -> bad JSON"))
 }
 
-/// First string value found under `key`, anywhere in the document
-/// (the visitorData token lives deep inside the search response).
 fn first_string(node: &Value, key: &str) -> Option<String> {
     match node {
         Value::Object(map) => {
@@ -92,7 +82,6 @@ async fn visitor_data() -> Result<String> {
     Ok(vd)
 }
 
-/// Pick a playable AAC format from a player response. Pure — unit tested.
 fn pick_format(adaptive: Option<&Value>, duration_secs: f64) -> Option<Resolved> {
     let formats = adaptive?.as_array()?;
     for itag in ITAG_AAC {
@@ -110,8 +99,6 @@ fn pick_format(adaptive: Option<&Value>, duration_secs: f64) -> Option<Resolved>
     None
 }
 
-/// Resolve a track to a directly downloadable AAC-MP4 url, signed for this
-/// machine's egress IP.
 pub async fn resolve(video_id: &str) -> Result<Resolved> {
     let vd = visitor_data().await?;
     let body = json!({
@@ -184,8 +171,6 @@ mod tests {
         assert!(pick_format(Some(&none_ok), 1.0).is_none());
     }
 
-    // Network-dependent; run explicitly with:
-    //   cargo test live_resolve -- --ignored --nocapture
     #[test]
     #[ignore]
     fn live_resolve() {
@@ -197,14 +182,13 @@ mod tests {
         assert!(res.itag == 140 || res.itag == 139);
     }
 
-    // Live proof that ranged downloading bypasses the byte-0 pacing.
     #[test]
     #[ignore]
     fn live_download() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let res = super::resolve("XVveECQmiAk").await.expect("resolve failed");
-            let client = crate::api::ApiClient::new("http://127.0.0.1:1"); // unused: absolute URL
+            let client = crate::api::ApiClient::new("http://127.0.0.1:1");
             let dest = std::env::temp_dir().join(format!("esm-live-{}.m4a", std::process::id()));
             let t0 = std::time::Instant::now();
             let bytes = client

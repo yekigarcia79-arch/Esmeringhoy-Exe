@@ -1,11 +1,8 @@
-//! Disk cache for downloaded tracks, with LRU eviction under a size cap.
-//! Tracks are a few MB each; eviction keeps the folder from growing without
-//! bound. The index lives in `index.json` next to the audio files.
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,17 +16,15 @@ struct CacheEntry {
     bytes: u64,
     last_used: u64,
     ext: String,
-    /// Monotonic recency marker: breaks ties when `last_used` collides
-    /// (same millisecond), so eviction is a true LRU.
     #[serde(default)]
     seq: u64,
 }
 
 pub struct TrackCache {
     root: PathBuf,
-    max_bytes: u64,
+    max_bytes: AtomicU64,
     inner: Mutex<CacheIndex>,
-    seq: std::sync::atomic::AtomicU64,
+    seq: AtomicU64,
 }
 
 fn now_secs() -> u64 {
@@ -52,7 +47,12 @@ impl TrackCache {
             .and_then(|s| serde_json::from_str::<CacheIndex>(&s).ok())
             .unwrap_or_default();
         let seq0 = next_seq_hint(&index);
-        let cache = Self { root, max_bytes, inner: Mutex::new(index), seq: std::sync::atomic::AtomicU64::new(seq0) };
+        let cache = Self {
+            root,
+            max_bytes: AtomicU64::new(max_bytes),
+            inner: Mutex::new(index),
+            seq: AtomicU64::new(seq0),
+        };
         cache.sweep_orphans();
         cache
     }
@@ -61,12 +61,36 @@ impl TrackCache {
         self.inner.lock().unwrap().entries.values().map(|e| e.bytes).sum()
     }
 
-    /// Path where a finished download for this video id should live.
+    pub fn stats(&self) -> (u64, usize) {
+        let idx = self.inner.lock().unwrap();
+        (idx.entries.values().map(|e| e.bytes).sum(), idx.entries.len())
+    }
+
+    pub fn cap(&self) -> u64 {
+        self.max_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn set_cap(&self, bytes: u64) {
+        self.max_bytes.store(bytes.max(1), Ordering::Relaxed);
+        self.evict_to_cap();
+        self.persist();
+    }
+
+    pub fn remove(&self, video_id: &str) {
+        let ext = {
+            let mut idx = self.inner.lock().unwrap();
+            idx.entries.remove(video_id).map(|e| e.ext)
+        };
+        if let Some(ext) = ext {
+            let _ = std::fs::remove_file(self.root.join(format!("{video_id}.{ext}")));
+            self.persist();
+        }
+    }
+
     pub fn path_for(&self, video_id: &str, ext: &str) -> PathBuf {
         self.root.join(format!("{video_id}.{ext}"))
     }
 
-    /// A playable local copy, if we have one. Refreshes last-used.
     pub fn lookup(&self, video_id: &str) -> Option<PathBuf> {
         let mut idx = self.inner.lock().unwrap();
         let mut ext = None;
@@ -86,7 +110,6 @@ impl TrackCache {
         Some(path)
     }
 
-    /// Record a finished download and evict if we are over the cap.
     pub fn record(&self, video_id: &str, ext: &str, bytes: u64) {
         {
             let next = self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -101,18 +124,24 @@ impl TrackCache {
     }
 
     pub fn clear_all(&self) -> Result<u64> {
+        let entries: Vec<(String, CacheEntry)> = {
+            let idx = self.inner.lock().unwrap();
+            idx.entries.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
         let mut freed = 0u64;
-        if self.root.is_dir() {
-            for e in std::fs::read_dir(&self.root).context("reading cache dir")? {
-                let e = e?;
-                let p = e.path();
-                if p.is_file() {
-                    freed += e.metadata().map(|m| m.len()).unwrap_or(0);
-                    let _ = std::fs::remove_file(&p);
-                }
+        let mut kept: Vec<String> = Vec::new();
+        for (id, entry) in entries {
+            let path = self.root.join(format!("{id}.{}", entry.ext));
+            match std::fs::remove_file(&path) {
+                Ok(()) => freed += entry.bytes,
+                Err(_) if path.is_file() => kept.push(id),
+                Err(_) => {}
             }
         }
-        self.inner.lock().unwrap().entries.clear();
+        {
+            let mut idx = self.inner.lock().unwrap();
+            idx.entries.retain(|id, _| kept.iter().any(|k| k == id));
+        }
         self.persist();
         Ok(freed)
     }
@@ -129,7 +158,7 @@ impl TrackCache {
                     .map(|(k, e)| (k.clone(), e.ext.clone(), e.bytes));
                 (bytes, oldest)
             };
-            if bytes <= self.max_bytes {
+            if bytes <= self.max_bytes.load(Ordering::Relaxed) {
                 break;
             }
             let Some((video_id, ext, size)) = oldest else { break };
@@ -142,7 +171,6 @@ impl TrackCache {
         }
     }
 
-    /// Remove stale temp files and index entries whose files vanished.
     fn sweep_orphans(&self) {
         if let Ok(rd) = std::fs::read_dir(&self.root) {
             for e in rd.flatten() {
@@ -203,7 +231,7 @@ mod tests {
 
         let f = cache.path_for("bbb", "m4a");
         std::fs::write(&f, b"12345678").unwrap();
-        cache.record("bbb", "m4a", 8); // total 16 > cap 10 → evict LRU ("aaa")
+        cache.record("bbb", "m4a", 8);
         assert!(!dir.join("aaa.m4a").is_file());
         assert_eq!(cache.total_bytes(), 8);
 

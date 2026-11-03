@@ -1,5 +1,3 @@
-//! Esmeringhoy — standalone Windows desktop music player.
-
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
@@ -27,6 +25,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::api_call,
+            commands::artist_thumb,
             commands::auth_sign_in,
             commands::auth_register,
             commands::auth_restore,
@@ -39,6 +38,8 @@ fn main() {
             commands::engine_set_volume,
             commands::engine_state,
             commands::cache_clear,
+            commands::cache_stats,
+            commands::cache_set_limit,
             commands::app_health,
             commands::api_base,
             commands::web_log,

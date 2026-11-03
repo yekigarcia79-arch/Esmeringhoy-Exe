@@ -1,7 +1,3 @@
-//! Tauri commands — the only surface between the webview and the world.
-//! Everything network-shaped goes through `api_call` (or a typed helper);
-//! the webview never sees the session token.
-
 use crate::engine::PlayingTrack;
 use crate::keystore;
 use crate::state::AppState;
@@ -9,8 +5,6 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 
-/// Generic API passthrough. Always answers (even offline) with an envelope:
-/// { status, ok, data } — status 0 means "network unreachable".
 #[tauri::command]
 pub async fn api_call(
     state: State<'_, Arc<AppState>>,
@@ -24,8 +18,6 @@ pub async fn api_call(
     }
 }
 
-/// Password sign-in. The backend answers with a session token when asked;
-/// we keep it in the OS credential manager and in memory only.
 #[tauri::command]
 pub async fn auth_sign_in(
     state: State<'_, Arc<AppState>>,
@@ -66,8 +58,6 @@ pub async fn auth_sign_in(
     Ok(json!({ "user": r.json.get("user").cloned().unwrap_or(Value::Null) }))
 }
 
-/// Registration (password only on desktop). Stores the session token like
-/// sign-in.
 #[tauri::command]
 pub async fn auth_register(
     state: State<'_, Arc<AppState>>,
@@ -114,7 +104,6 @@ pub async fn auth_register(
     Ok(json!({ "user": r.json.get("user").cloned().unwrap_or(Value::Null) }))
 }
 
-/// Silent relaunch: reuse the stored token; drop it if the server says no.
 #[tauri::command]
 pub async fn auth_restore(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let Some(token) = keystore::load_token() else {
@@ -132,7 +121,6 @@ pub async fn auth_restore(state: State<'_, Arc<AppState>>) -> Result<Value, Stri
     })
 }
 
-/// Sign out: revoke the server session, stop audio, clear the stored token.
 #[tauri::command]
 pub async fn auth_sign_out(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let _ = state.api.call("POST", "/api/auth/logout", Some(json!({}))).await;
@@ -141,7 +129,6 @@ pub async fn auth_sign_out(state: State<'_, Arc<AppState>>) -> Result<(), String
     keystore::delete_token()
 }
 
-/// Load a track (already cleared by the server) and play it.
 #[tauri::command]
 pub async fn engine_load(
     state: State<'_, Arc<AppState>>,
@@ -157,8 +144,6 @@ pub async fn engine_load(
         .map_err(|e| e.to_string())
 }
 
-/// Pause/resume the current track. Returns the new paused state, or null if
-/// there is nothing to toggle.
 #[tauri::command]
 pub fn engine_toggle(state: State<'_, Arc<AppState>>) -> Value {
     match state.engine.toggle_pause() {
@@ -168,12 +153,32 @@ pub fn engine_toggle(state: State<'_, Arc<AppState>>) -> Value {
 }
 
 #[tauri::command]
-pub fn engine_seek(state: State<'_, Arc<AppState>>, secs: f64) -> Result<(), String> {
+pub async fn engine_seek(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    secs: f64,
+) -> Result<(), String> {
+    if let Some(tail) = state.engine.streaming_tail() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !tail.is_done() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        if tail.error().is_none() {
+            if let Some(track) = state.engine.current() {
+                let api = Arc::clone(&state.api);
+                let cache = Arc::clone(&state.cache);
+                state.engine.stop();
+                state
+                    .engine
+                    .load_and_play(&app, &api, &cache, track)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
     state.engine.seek(secs).map_err(|e| e.to_string())
 }
 
-/// Follow the server's transport state (the snapshot is the source of
-/// truth for playing/paused; the engine follows it).
 #[tauri::command]
 pub fn engine_set_transport(state: State<'_, Arc<AppState>>, transport: String) {
     let should_pause = transport == "paused" || transport == "idle";
@@ -190,7 +195,6 @@ pub fn engine_set_transport(state: State<'_, Arc<AppState>>, transport: String) 
     }
 }
 
-/// Stop playback entirely (no track loaded).
 #[tauri::command]
 pub fn engine_stop(state: State<'_, Arc<AppState>>) {
     state.engine.stop();
@@ -210,7 +214,6 @@ pub fn engine_set_volume(state: State<'_, Arc<AppState>>, volume: f32) -> Result
 #[tauri::command]
 pub fn engine_state(state: State<'_, Arc<AppState>>) -> Value {
     let mut s = state.engine.state();
-    // (kept for API stability; the view already carries everything the UI needs)
     let _ = &mut s;
     json!({
         "state": s.state,
@@ -222,14 +225,32 @@ pub fn engine_state(state: State<'_, Arc<AppState>>) -> Value {
     })
 }
 
-/// Wipe the track cache; returns bytes freed.
 #[tauri::command]
 pub fn cache_clear(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
-    state.engine.stop();
     state.cache.clear_all().map_err(|e| e.to_string())
 }
 
-/// App/backend health for the settings view.
+#[tauri::command]
+pub fn cache_stats(state: State<'_, Arc<AppState>>) -> Value {
+    let (used, tracks) = state.cache.stats();
+    json!({
+        "usedBytes": used,
+        "tracks": tracks,
+        "limitBytes": state.cache.cap(),
+    })
+}
+
+#[tauri::command]
+pub fn cache_set_limit(state: State<'_, Arc<AppState>>, gb: u64) -> Result<Value, String> {
+    state.set_cache_limit(gb).map_err(|e| e.to_string())?;
+    let (used, tracks) = state.cache.stats();
+    Ok(json!({
+        "usedBytes": used,
+        "tracks": tracks,
+        "limitBytes": state.cache.cap(),
+    }))
+}
+
 #[tauri::command]
 pub fn app_health(state: State<'_, Arc<AppState>>) -> Value {
     json!({
@@ -240,16 +261,23 @@ pub fn app_health(state: State<'_, Arc<AppState>>) -> Value {
     })
 }
 
-/// The backend base URL — the webview needs it for media (`<img>`,
-/// `<video>`) which cannot carry an Authorization header, so signed URLs
-/// and artwork are addressed absolutely.
 #[tauri::command]
 pub fn api_base(state: State<'_, Arc<AppState>>) -> String {
     state.api.base_url().to_string()
 }
 
-/// Webview diagnostics: the ported UI writes errors here, so failures are
-/// visible outside devtools (append-only, capped).
+#[tauri::command]
+pub async fn artist_thumb(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("empty artist name".into());
+    }
+    state.api.thumb_data_url(name).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn web_log(state: State<'_, Arc<AppState>>, message: String) {
     let path = state.prefs_path.with_file_name("web.log");

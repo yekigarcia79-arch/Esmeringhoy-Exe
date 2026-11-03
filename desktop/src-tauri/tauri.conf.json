@@ -15,13 +15,18 @@
       {
         "label": "main",
         "title": "Esmeringhoy",
-        "width": 1280,
-        "height": 800,
+        "width": 1180,
+        "height": 740,
         "minWidth": 940,
         "minHeight": 600,
-        "resizable": true,
+        "resizable": false,
+        "maximizable": false,
         "fullscreen": false,
-        "backgroundColor": "#0a0a0a"
+        "decorations": false,
+        "transparent": true,
+        "noRedirectionBitmap": true,
+        "shadow": false,
+        "center": true
       }
     ],
     "security": {
@@ -62,7 +67,9 @@
       },
       "nsis": {
         "installMode": "currentUser",
-        "startMenuFolder": "Esmeringhoy"
+        "startMenuFolder": "Esmeringhoy",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
       }
     }
   }

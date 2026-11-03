@@ -1,7 +1,3 @@
-//! Persistent session storage in the OS credential manager (Windows
-//! Credential Manager via the `keyring` crate). The session token is never
-//! written to disk, logs, or the webview.
-
 use keyring::Entry;
 
 const SERVICE: &str = "dev.esmeringhoy.desktop";

@@ -1,14 +1,3 @@
-// Reading a playlist exported from Spotify.
-//
-// Exportify (github.com/pavelkomarov/exportify, exportify.net) writes a CSV with
-// a "Track Name" / "Artist Name(s)" / "Album Name" / "Duration (ms)" header, but
-// the column set has changed over the years and the file is quoted CSV — a
-// title or an artist can contain a comma, a quote or a newline. So the columns
-// are found by name, never by position, and the file is parsed properly rather
-// than split on commas.
-//
-// Pure: no DOM, so test-import.mjs can run it under node.
-
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 const TITLE_KEYS = ['trackname', 'title', 'name', 'song', 'songname', 'track'];
@@ -16,7 +5,6 @@ const ARTIST_KEYS = ['artistnames', 'artistname', 'artists', 'artist'];
 const ALBUM_KEYS = ['albumname', 'album'];
 const DUR_KEYS = ['durationms', 'trackdurationms', 'duration', 'length'];
 
-// "178000" is milliseconds, "178" is seconds, "2:58" is neither.
 function toSeconds(raw) {
   const s = String(raw ?? '').trim();
   if (!s) return 0;
@@ -27,12 +15,9 @@ function toSeconds(raw) {
 
   const n = Number(s.replace(/[^\d.]/g, ''));
   if (!Number.isFinite(n) || n <= 0) return 0;
-  // A track longer than 10 000 seconds is a book, not a song: the column is ms.
   return Math.round(n > 10000 ? n / 1000 : n);
 }
 
-// A real CSV reader: quoted fields, "" as an escaped quote, newlines inside
-// quotes, CRLF, and a byte-order mark at the front.
 export function parseCsv(text) {
   const s = String(text || '').replace(/^\uFEFF/, '');
   const rows = [];
@@ -74,7 +59,6 @@ export function parseCsv(text) {
     rows.push(row);
   }
 
-  // Drop trailing blank lines.
   return rows.filter((r) => r.some((cell) => String(cell).trim() !== ''));
 }
 
@@ -86,9 +70,6 @@ function pick(header, keys) {
   return -1;
 }
 
-// A file with no header we recognise is read as "Artist - Title" per line, but
-// only if the first line is not itself a header. "Artist - Title" as a heading
-// looks exactly like a track, so it is matched against the words a heading uses.
 const HEADER_WORDS = new Set(['artist', 'artists', 'title', 'song', 'track', 'name', 'album', 'duration', 'length']);
 
 function isHeaderLine(line) {
@@ -107,7 +88,6 @@ function fromRows(rows) {
   const li = pick(header, ALBUM_KEYS);
   const di = pick(header, DUR_KEYS);
 
-  // Not a table with a header we recognise: treat every line as "Artist - Title".
   if (ti < 0) {
     const lines = rows.map((r) => String(r[0] || '').trim()).filter(Boolean);
     if (lines.length > 1 && isHeaderLine(lines[0])) lines.shift();
@@ -134,7 +114,6 @@ function fromRows(rows) {
   return out;
 }
 
-// A few forks and other tools export JSON instead; accept the common shapes.
 function fromJson(parsed) {
   const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.tracks) ? parsed.tracks : null;
   if (!list) return null;
@@ -158,7 +137,6 @@ function fromJson(parsed) {
   return out;
 }
 
-// Same song listed twice in one file is one row; a playlist is not a ballot.
 function dedupe(rows) {
   const seen = new Set();
   const out = [];
@@ -171,7 +149,6 @@ function dedupe(rows) {
   return out;
 }
 
-// What the UI hands to the matcher.
 export function parsePlaylistExport(text, limit = 500) {
   const raw = String(text || '').trim();
   if (!raw) return { rows: [], skipped: 0 };

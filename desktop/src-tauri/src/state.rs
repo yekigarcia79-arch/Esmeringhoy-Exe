@@ -1,6 +1,3 @@
-//! Shared application state: API client, audio engine, track cache, and the
-//! small persistent settings file (volume). Managed as one Arc-<AppState>.
-
 use crate::api::ApiClient;
 use crate::cache::TrackCache;
 use crate::engine::Engine;
@@ -9,18 +6,30 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub const CACHE_CAP_BYTES: u64 = 1024 * 1024 * 1024; // 1 GB
+pub const DEFAULT_CACHE_GB: u64 = 5;
+pub const CACHE_GB_CHOICES: [u64; 2] = [5, 10];
 pub const ENV_API_BASE: &str = "ESM_API_BASE";
+
+fn default_cache_gb() -> u64 {
+    DEFAULT_CACHE_GB
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Prefs {
     pub volume: f32,
+    #[serde(default = "default_cache_gb")]
+    pub cache_limit_gb: u64,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { volume: 0.7 }
+        Self { volume: 0.7, cache_limit_gb: DEFAULT_CACHE_GB }
     }
+}
+
+pub fn cache_cap_bytes(gb: u64) -> u64 {
+    let gb = if CACHE_GB_CHOICES.contains(&gb) { gb } else { DEFAULT_CACHE_GB };
+    gb * 1024 * 1024 * 1024
 }
 
 pub struct AppState {
@@ -42,15 +51,20 @@ impl AppState {
             .unwrap_or_default();
 
         let cache_dir = data_dir.join("cache");
-        let cache = Arc::new(TrackCache::new(cache_dir, CACHE_CAP_BYTES));
+        let cache = Arc::new(TrackCache::new(cache_dir, cache_cap_bytes(prefs.cache_limit_gb)));
 
-        // ESM_API_BASE overrides the backend for local development
-        // (e.g. http://127.0.0.1:8788 with `npm start` in the web repo).
         let base = std::env::var(ENV_API_BASE).unwrap_or_else(|_| crate::api::DEFAULT_BASE_URL.to_string());
         let api = Arc::new(ApiClient::new(&base));
         let engine = Arc::new(Engine::new(prefs.volume).context("audio engine failed to start")?);
 
         Ok(Self { api, cache, engine, prefs: Mutex::new(prefs), prefs_path })
+    }
+
+    pub fn set_cache_limit(&self, gb: u64) -> Result<()> {
+        let gb = if CACHE_GB_CHOICES.contains(&gb) { gb } else { DEFAULT_CACHE_GB };
+        self.cache.set_cap(cache_cap_bytes(gb));
+        self.prefs.lock().unwrap().cache_limit_gb = gb;
+        self.save_prefs()
     }
 
     pub fn save_prefs(&self) -> Result<()> {

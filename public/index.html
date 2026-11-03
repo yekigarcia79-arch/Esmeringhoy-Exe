@@ -12,14 +12,11 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/css/styles.css?v=20261103a">
+<link rel="stylesheet" href="/css/styles.css?v=20261103f">
 <link rel="icon" type="image/png" sizes="64x64" href="/img/icon.png">
 <link rel="apple-touch-icon" href="/img/icon-180.png">
 </head>
 <body>
-
-<div class="ambient" id="ambientA" aria-hidden="true"></div>
-<div class="ambient" id="ambientB" aria-hidden="true"></div>
 
 <svg class="sprite" aria-hidden="true" focusable="false">
   <defs>
@@ -52,7 +49,12 @@
   </defs>
 </svg>
 
-<div class="app">
+<div class="shell">
+
+  <div class="ambient" id="ambientA" aria-hidden="true"></div>
+  <div class="ambient" id="ambientB" aria-hidden="true"></div>
+
+  <div class="app">
 
   <header class="topbar">
     <a class="brand" href="#" data-nav="home" aria-label="Esmeringhoy home">
@@ -78,6 +80,7 @@
           <span id="userName">—</span>
         </button>
         <div class="user-menu" id="userMenu" role="menu">
+          <button class="user-menu-item" id="settingsBtn" role="menuitem">Settings</button>
           <button class="user-menu-item" id="accountBtn" role="menuitem">Account</button>
           <button class="user-menu-item" id="logoutBtn" role="menuitem">Log out</button>
         </div>
@@ -171,7 +174,21 @@
       <span class="vol-num" id="volNum">70</span>
     </div>
   </footer>
+  </div>
 </div>
+
+<nav class="win-controls" aria-label="Window controls">
+  <button class="win-btn" id="winMin" type="button" title="Minimize" aria-label="Minimize">
+    <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.5h7"/></svg>
+  </button>
+  <button class="win-btn" id="winFull" type="button" title="Fullscreen" aria-label="Fullscreen" aria-pressed="false">
+    <svg class="ic-max" viewBox="0 0 12 12" aria-hidden="true"><rect x="2.9" y="2.9" width="6.2" height="6.2" rx="0.9"/></svg>
+    <svg class="ic-min" viewBox="0 0 12 12" aria-hidden="true"><rect x="2" y="3.7" width="5" height="5" rx="0.8"/><path d="M4.3 3.7V2.2h5.5v5.5H8.2"/></svg>
+  </button>
+  <button class="win-btn win-btn-close" id="winClose" type="button" title="Close" aria-label="Close">
+    <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3.2 3.2 5.6 5.6M8.8 3.2 3.2 8.8"/></svg>
+  </button>
+</nav>
 
 <div class="auth" id="auth" hidden>
   <div class="auth-split">
@@ -322,6 +339,41 @@
   </div>
 </div>
 
+<div class="modal" id="setModal" hidden>
+  <div class="modal-backdrop" id="setBackdrop"></div>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="setTitle">
+    <header class="sheet-head">
+      <div>
+        <p class="eyebrow">Settings</p>
+        <h2 id="setTitle">Playback &amp; storage</h2>
+      </div>
+      <button class="icon-btn" id="setClose" aria-label="Close"><svg class="ic"><use href="#i-close"/></svg></button>
+    </header>
+
+    <section class="set-block">
+      <div class="set-label">Cache limit</div>
+      <p class="set-note">Every track you play is kept on this PC, so playing it again is instant and offline. At the limit, the least recently played are removed first.</p>
+      <div class="seg" id="cacheLimit" role="radiogroup" aria-label="Cache limit">
+        <button class="seg-item" data-gb="5" role="radio" aria-checked="true">5 GB</button>
+        <button class="seg-item" data-gb="10" role="radio" aria-checked="false">10 GB</button>
+      </div>
+    </section>
+
+    <section class="set-block">
+      <div class="set-row">
+        <div>
+          <div class="set-label">Storage used</div>
+          <p class="set-note" id="cacheUsage">—</p>
+        </div>
+        <button class="btn sm" id="cacheClear" type="button">Clear cache</button>
+      </div>
+      <div class="meter" aria-hidden="true"><span id="cacheBar"></span></div>
+    </section>
+
+    <p class="sheet-note">The cache lives in your local app data, apart from the program files — updating or reinstalling never removes it.</p>
+  </div>
+</div>
+
 <div class="modal" id="acctModal" hidden>
   <div class="modal-backdrop" id="acctBackdrop"></div>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="acctTitle">
@@ -346,6 +398,6 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script type="module" src="/js/app.js?v=20261103a"></script>
+<script type="module" src="/js/app.js?v=20261103l"></script>
 </body>
 </html>

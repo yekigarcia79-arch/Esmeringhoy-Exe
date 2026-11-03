@@ -1,10 +1,3 @@
-//! HTTP client for the Esmeringhoy backend (the open-source web player's
-//! API). The desktop is a first-party client: it logs in with the session
-//! token in `Authorization: Bearer …`, never with cookies.
-//!
-//! Every request the UI makes goes through `ApiClient::call`, so the token
-//! never reaches the webview. Large binary downloads use `download_to_file`.
-
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use reqwest::{Client, Method};
@@ -59,7 +52,6 @@ impl ApiClient {
         self.token.lock().unwrap().clone()
     }
 
-    /// JSON request with optional body. Auth is attached when present.
     pub async fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<ApiResponse> {
         let method = Method::from_bytes(method.as_bytes()).context("bad http method")?;
         let url = format!("{}/{}", self.base_url, path.trim_start_matches('/'));
@@ -77,20 +69,91 @@ impl ApiClient {
         Ok(ApiResponse { status, json })
     }
 
-    /// GET a text/plain or json endpoint without a body — same as `call`.
     pub async fn get(&self, path: &str) -> Result<ApiResponse> {
         self.call("GET", path, None).await
     }
 
-    /// Download with sequential 1 MiB `Range` requests until a short read or
-    /// a 416. Google paces the byte-0-first stream to playback rate (itag
-    /// 140 is a 128 kbps stream), but ranged reads from later offsets are
-    /// served at full speed — this turns a ~3 minute trickle into ~1-2 s.
-    ///
-    /// `url_or_path` is either an absolute url (a googlevideo link signed
-    /// for this machine's IP) or a backend path (relayed through the
-    /// session token; the relay forwards `Range` upstream). No
-    /// Content-Length is required: short read (or 416) ends the download.
+    pub async fn thumb_data_url(&self, name: &str) -> Result<String> {
+        if let Ok(url) = self.backend_thumb(name).await {
+            return Ok(url);
+        }
+        let art = self.deezer_artist_art(name).await?;
+        self.image_data_url(&art).await
+    }
+
+    async fn backend_thumb(&self, name: &str) -> Result<String> {
+        let url = format!("{}/api/thumb?name={}", self.base_url, encode_query(name));
+        let mut req = self.http.get(&url);
+        if let Some(t) = self.token() {
+            req = req.bearer_auth(t);
+        }
+        let res = req.send().await.context("thumb request failed")?;
+        if !res.status().is_success() {
+            return Err(anyhow!("thumb HTTP {}", res.status()));
+        }
+        let mime = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| v.starts_with("image/"))
+            .unwrap_or("image/jpeg")
+            .to_string();
+        let bytes = res.bytes().await.context("reading thumb")?;
+        if bytes.is_empty() {
+            return Err(anyhow!("empty thumb"));
+        }
+        Ok(format!("data:{};base64,{}", mime, base64(&bytes)))
+    }
+
+    async fn deezer_artist_art(&self, name: &str) -> Result<String> {
+        let url = format!(
+            "https://api.deezer.com/search/artist?q={}&limit=1",
+            encode_query(name)
+        );
+        let res = self.http.get(&url).send().await.context("deezer request failed")?;
+        if !res.status().is_success() {
+            return Err(anyhow!("deezer HTTP {}", res.status()));
+        }
+        let json: Value = res.json().await.context("deezer json")?;
+        let hit = json.get("data").and_then(|d| d.get(0));
+        let found = hit
+            .and_then(|a| a.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !same_artist(found, name) {
+            return Err(anyhow!("no deezer match for {name}"));
+        }
+        let art = hit
+            .and_then(|a| a.get("picture_medium"))
+            .or_else(|| hit.and_then(|a| a.get("picture_big")))
+            .or_else(|| hit.and_then(|a| a.get("picture")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if art.is_empty() {
+            return Err(anyhow!("deezer has no picture for {name}"));
+        }
+        Ok(art.replace("/250x250-", "/500x500-"))
+    }
+
+    async fn image_data_url(&self, url: &str) -> Result<String> {
+        let res = self.http.get(url).send().await.context("image request failed")?;
+        if !res.status().is_success() {
+            return Err(anyhow!("image HTTP {}", res.status()));
+        }
+        let mime = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| v.starts_with("image/"))
+            .unwrap_or("image/jpeg")
+            .to_string();
+        let bytes = res.bytes().await.context("reading image")?;
+        if bytes.is_empty() {
+            return Err(anyhow!("empty image"));
+        }
+        Ok(format!("data:{};base64,{}", mime, base64(&bytes)))
+    }
+
     pub async fn download_ranged(
         &self,
         url_or_path: &str,
@@ -126,7 +189,7 @@ impl ApiClient {
             let res = req.send().await.context("range request failed")?;
             let code = res.status().as_u16();
             if code == 416 {
-                break; // offset past EOF — done
+                break;
             }
             if code != 200 && code != 206 {
                 let body = res.text().await.unwrap_or_default();
@@ -150,6 +213,7 @@ impl ApiClient {
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.context("range stream broke")?;
                 file.write_all(&chunk).await.context("writing part file")?;
+                file.flush().await.context("flushing part file")?;
                 wrote += chunk.len() as u64;
                 on_progress(off + wrote, total);
             }
@@ -158,7 +222,7 @@ impl ApiClient {
             }
             off += wrote;
             if from_200 || wrote < CHUNK {
-                break; // single-shot response, or last (short) chunk
+                break;
             }
         }
 
@@ -168,4 +232,43 @@ impl ApiClient {
         Ok(off)
     }
 
+}
+
+fn encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let n = ((chunk[0] as u32) << 16)
+            | ((*chunk.get(1).unwrap_or(&0) as u32) << 8)
+            | (*chunk.get(2).unwrap_or(&0) as u32);
+        out.push(A[(n >> 18) as usize & 63] as char);
+        out.push(A[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { A[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { A[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+fn same_artist(a: &str, b: &str) -> bool {
+    fn norm(s: &str) -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(|c| c.to_lowercase())
+            .collect()
+    }
+    let (x, y) = (norm(a), norm(b));
+    !x.is_empty() && x == y
 }
