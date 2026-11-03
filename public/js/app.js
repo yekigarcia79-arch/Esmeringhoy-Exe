@@ -214,13 +214,25 @@ async function send(cmd, extra = {}, opts = {}) {
 // (seek, volume) are forwarded to the engine.
 const audio = {
   _pos: 0, _dur: 0, _paused: true, _ended: false,
-  get currentTime() { return this._pos; },
-  set currentTime(t) { this._pos = Math.max(0, Number(t) || 0); invoke('engine_seek', { secs: this._pos }).catch(() => {}); },
+  // Interpolation anchor: position events arrive at ~2.5 Hz; the fill and
+  // progress bar must move every frame, so the shim advances them locally
+  // between events while the track is playing.
+  _at: 0,
+  get currentTime() {
+    if (this._paused || !this._at) return this._pos;
+    const t = this._pos + (performance.now() - this._at) / 1000;
+    return this._dur > 0 ? Math.min(t, this._dur) : t;
+  },
+  set currentTime(t) {
+    this._pos = Math.max(0, Number(t) || 0);
+    this._at = performance.now();
+    invoke('engine_seek', { secs: this._pos }).catch(() => {});
+  },
   get duration() { return this._dur; },
   get paused() { return this._paused; },
   get ended() { return this._ended; },
   set volume(v) { invoke('engine_set_volume', { volume: v }).catch(() => {}); },
-  play() { this._paused = false; },
+  play() { this._paused = false; this._at = performance.now(); },
   pause() { this._paused = true; },
   load() {},
   removeAttribute() {},
@@ -307,6 +319,7 @@ listen('player:position', (e) => {
   audio._pos = Number(p.pos) || 0;
   audio._dur = Number(p.duration) || 0;
   audio._paused = p.state !== 'playing';
+  audio._at = audio._paused ? 0 : performance.now();
   document.body.classList.toggle('is-playing', p.state === 'playing');
 });
 listen('player:loading', (e) => {
@@ -316,7 +329,7 @@ listen('player:loading', (e) => {
     try { renderChrome(); } catch {}
   }
 });
-listen('player:track-changed', () => { try { renderPlayer(); } catch {} });
+listen('player:track-changed', () => { try { audio._pos = 0; audio._at = performance.now(); renderPlayer(); } catch {} });
 listen('player:error', (e) => toast(e?.payload?.message || 'Playback failed'));
 listen('player:idle', () => { if (S) { S.transport = 'idle'; try { renderPlayer(); } catch {} } });
 
