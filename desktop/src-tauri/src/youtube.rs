@@ -18,7 +18,10 @@ const ITAG_AAC: [u64; 2] = [140, 139]; // Symphonia decodes these; Opus itags ar
 #[derive(Clone, Debug)]
 pub struct Resolved {
     pub url: String,
+    // Kept for unit tests and future diagnostics; the engine downloads `url` only.
+    #[allow(dead_code)]
     pub itag: u32,
+    #[allow(dead_code)]
     pub duration_secs: f64,
 }
 
