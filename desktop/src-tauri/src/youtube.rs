@@ -196,4 +196,25 @@ mod tests {
         assert!(res.duration_secs > 60.0);
         assert!(res.itag == 140 || res.itag == 139);
     }
+
+    // Live proof that ranged downloading bypasses the byte-0 pacing.
+    #[test]
+    #[ignore]
+    fn live_download() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let res = super::resolve("XVveECQmiAk").await.expect("resolve failed");
+            let client = crate::api::ApiClient::new("http://127.0.0.1:1"); // unused: absolute URL
+            let dest = std::env::temp_dir().join(format!("esm-live-{}.m4a", std::process::id()));
+            let t0 = std::time::Instant::now();
+            let bytes = client
+                .download_ranged(&res.url, &dest, |_, _| {})
+                .await
+                .expect("download failed");
+            println!("downloaded {bytes} bytes in {:?}", t0.elapsed());
+            assert_eq!(bytes, 2_877_457);
+            assert!(dest.is_file());
+            let _ = std::fs::remove_file(&dest);
+        });
+    }
 }

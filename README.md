@@ -120,6 +120,9 @@ Design rules:
   datacenter IPs with `playabilityStatus=LOGIN_REQUIRED`, so audio is
   resolved directly (`youtube.rs`) and downloads go Google → this machine.
   The backend relay (`/api/stream?codec=aac`) is the fallback.
+- **Downloads are ranged in 1 MiB chunks** — Google paces the byte-0 stream
+  to playback rate, but `Range` requests from later offsets are served full
+  speed; a track fetches in under a second instead of timing out at ~1 MB.
 - **Tracks are cached locally** (~1 GB LRU) — seeks are file seeks, replays
   are offline.
 - **All `/api` traffic goes through Rust**; the webview never sees the

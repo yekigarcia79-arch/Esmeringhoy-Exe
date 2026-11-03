@@ -221,7 +221,7 @@ impl Engine {
             Ok(res) => {
                 let mut last_emit = 0u64;
                 let bytes = api
-                    .download_url(&res.url, &dest, |written, total| {
+                    .download_ranged(&res.url, &dest, |written, total| {
                         if written.saturating_sub(last_emit) >= 256 * 1024 {
                             last_emit = written;
                             let _ = app.emit(
@@ -246,7 +246,7 @@ impl Engine {
         // 2) Fallback: backend relay.
         let mut last_emit = 0u64;
         let bytes = api
-            .download_to_file(
+            .download_ranged(
                 &format!("/api/stream/{video_id}?codec=aac"),
                 &dest,
                 |written, total| {
