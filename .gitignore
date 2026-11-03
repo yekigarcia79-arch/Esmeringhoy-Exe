@@ -35,3 +35,6 @@ cache/
 
 # WorkBuddy project memory (local, not source)
 .workbuddy-ai/
+
+# Screenshot captures
+*.bmp
