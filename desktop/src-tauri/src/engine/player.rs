@@ -13,7 +13,7 @@ use serde_json::json;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -61,13 +61,20 @@ pub struct EngineStateView {
     pub track: Option<PlayingTrack>,
 }
 
+struct LoadCtl {
+    loading: bool,
+    /// A load requested while another is still downloading — last click
+    /// wins; it runs as soon as the current load settles.
+    pending: Option<PlayingTrack>,
+}
+
 pub struct Engine {
     device_sink: MixerDeviceSink,
     player: Mutex<Option<Player>>,
     current: Mutex<Option<PlayingTrack>>,
     duration_hint: Mutex<Duration>,
-    loading: AtomicBool,
     generation: AtomicU64,
+    ctl: Mutex<LoadCtl>,
     volume: Mutex<f32>,
 }
 
@@ -81,8 +88,8 @@ impl Engine {
             player: Mutex::new(None),
             current: Mutex::new(None),
             duration_hint: Mutex::new(Duration::ZERO),
-            loading: AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            ctl: Mutex::new(LoadCtl { loading: false, pending: None }),
             volume: Mutex::new(volume.clamp(0.0, 1.0)),
         })
     }
@@ -104,7 +111,7 @@ impl Engine {
     }
 
     pub fn is_loading(&self) -> bool {
-        self.loading.load(Ordering::SeqCst)
+        self.ctl.lock().unwrap().loading
     }
 
     pub fn state(&self) -> EngineStateView {
@@ -130,7 +137,9 @@ impl Engine {
 
     /// Play a track, downloading it first if it is not in the cache. The
     /// server already decided *that* this track plays; the engine makes the
-    /// bytes audible.
+    /// bytes audible. If a previous load is still running, the newer request
+    /// waits in the pending slot and supersedes it when it settles — the
+    /// user never loses a click, and rapid clicks resolve last-click-wins.
     pub async fn load_and_play(
         self: &Arc<Self>,
         app: &AppHandle,
@@ -138,15 +147,36 @@ impl Engine {
         cache: &Arc<TrackCache>,
         track: PlayingTrack,
     ) -> Result<()> {
-        if self.loading.swap(true, Ordering::SeqCst) {
-            return Err(anyhow!("another load is in flight"));
+        {
+            let mut ctl = self.ctl.lock().unwrap();
+            if ctl.loading {
+                // The loader running right now will pick this up next —
+                // last click wins, nothing is lost or duplicated.
+                ctl.pending = Some(track);
+                return Ok(());
+            }
+            ctl.loading = true;
         }
-        let result = self.load_inner(app, api, cache, track).await;
-        self.loading.store(false, Ordering::SeqCst);
-        if let Err(e) = &result {
-            let _ = app.emit(ERROR_EVENT, json!({ "message": e.to_string() }));
+
+        let mut cur = Some(track);
+        loop {
+            let Some(t) = cur.take() else { break };
+            let result = self.load_inner(app, api, cache, t).await;
+            if let Err(e) = &result {
+                let _ = app.emit(ERROR_EVENT, json!({ "message": e.to_string() }));
+            }
+            // One critical section decides: run the next pending load, or
+            // stand down — no request can slip through the gap.
+            let mut ctl = self.ctl.lock().unwrap();
+            match ctl.pending.take() {
+                Some(next) => cur = Some(next),
+                None => {
+                    ctl.loading = false;
+                    return Ok(());
+                }
+            }
         }
-        result
+        Ok(())
     }
 
     async fn load_inner(

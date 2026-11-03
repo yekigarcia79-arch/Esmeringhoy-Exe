@@ -113,6 +113,9 @@ Design rules:
 
 - **The server decides what plays next** (queue → repeat-all → radio); the
   desktop only renders the snapshot and plays the bytes.
+- **Last click wins, always** — a track requested while another is loading
+  waits in the pending slot and supersedes it when it settles; clicks are
+  never dropped and never error.
 - **Streams resolve from this machine** — YouTube answers Cloudflare Workers'
   datacenter IPs with `playabilityStatus=LOGIN_REQUIRED`, so audio is
   resolved directly (`youtube.rs`) and downloads go Google → this machine.
