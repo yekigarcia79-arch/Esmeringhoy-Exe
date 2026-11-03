@@ -2830,36 +2830,8 @@ body.is-fullscreen { --win-r: 0px; }
   white-space: pre-wrap;
 }
 
-/* Settings is a page, not a dialog: it fills the window and the player is
-   gone while it is open. */
-#setModal {
-  padding: 0;
-  background: var(--bg);
+#setModal .modal-backdrop {
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
-
-#setModal .modal-backdrop { display: none; }
-
-#setModal .sheet {
-  width: 100%;
-  height: 100%;
-  max-width: none;
-  max-height: none;
-  border: 0;
-  border-radius: 0;
-  background: var(--bg);
-  padding: 44px 48px 56px;
-  overflow-y: auto;
-}
-
-#setModal .sheet > * {
-  width: 100%;
-  max-width: 640px;
-  margin-left: auto;
-  margin-right: auto;
-}
-
-#setModal .sheet-head { margin-bottom: 8px; }
-
-#setModal .sheet-head h2 { font-size: 30px; }
-
-#setModal .set-block { padding: 22px 0; }
