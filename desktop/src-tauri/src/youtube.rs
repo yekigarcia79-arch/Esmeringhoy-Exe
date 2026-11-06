@@ -192,7 +192,7 @@ mod tests {
             let dest = std::env::temp_dir().join(format!("esm-live-{}.m4a", std::process::id()));
             let t0 = std::time::Instant::now();
             let bytes = client
-                .download_ranged(&res.url, &dest, |_, _| {})
+                .download_ranged(&res.url, &dest, |_, _| {}, None)
                 .await
                 .expect("download failed");
             println!("downloaded {bytes} bytes in {:?}", t0.elapsed());

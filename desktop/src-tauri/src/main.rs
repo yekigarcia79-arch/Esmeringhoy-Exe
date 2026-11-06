@@ -3,8 +3,10 @@
 mod api;
 mod cache;
 mod commands;
+mod discord;
 mod engine;
 mod keystore;
+mod preload;
 mod state;
 mod youtube;
 
@@ -40,10 +42,19 @@ fn main() {
             commands::cache_clear,
             commands::cache_stats,
             commands::cache_set_limit,
+            commands::cached_tracks,
+            commands::cache_download_all,
+            commands::cache_preload,
+            commands::preload_status,
             commands::app_health,
             commands::check_update,
             commands::install_update,
             commands::open_url,
+            commands::settings_get,
+            commands::general_set,
+            commands::appearance_set,
+            commands::discord_rpc_set,
+            commands::discord_rpc_sync,
             commands::api_base,
             commands::web_log,
         ])

@@ -1,6 +1,6 @@
 {
   "name": "esmeringhoy-desktop",
-  "version": "1.0.3",
+  "version": "1.0.0",
   "private": true,
   "description": "Esmeringhoy — standalone Windows desktop music player (Tauri + Rust audio engine + the open-source web player's UI).",
   "scripts": {

@@ -1,6 +1,6 @@
 [package]
 name = "esmeringhoy"
-version = "1.0.3"
+version = "1.0.0"
 description = "Esmeringhoy — standalone desktop music player"
 authors = ["Esmeringhoy"]
 edition = "2021"
@@ -28,6 +28,7 @@ rodio = { version = "0.23", default-features = false, features = [
 ] }
 futures-util = "0.3"
 keyring = "4"
+discord-rich-presence = "1.1"
 anyhow = "1"
 
 [profile.release]

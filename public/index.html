@@ -12,7 +12,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/css/styles.css?v=20261103j">
+<link rel="stylesheet" href="/css/styles.css?v=20261106a">
 <link rel="icon" type="image/png" sizes="64x64" href="/img/icon.png">
 <link rel="apple-touch-icon" href="/img/icon-180.png">
 </head>
@@ -46,6 +46,11 @@
     <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
     <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
     <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 1.8"/></symbol>
+    <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="6.5" ry="2.6"/><path d="M5.5 6v11.8c0 1.4 2.9 2.6 6.5 2.6s6.5-1.2 6.5-2.6V6"/><path d="M5.5 12c0 1.4 2.9 2.6 6.5 2.6s6.5-1.2 6.5-2.6"/></symbol>
+    <symbol id="i-discord" viewBox="0 0 24 24"><path d="M7.3 7.2c1.5-.7 3-.9 4.7-.9s3.2.2 4.7.9c1.6 2.1 2.4 4.5 2.4 7.1-1.2 1-2.2 1.6-3.2 1.9-.5-.9-.9-1.7-1.3-2.7 1.2-.4 2.1-1 2.9-1.9-1.4.9-2.7 1.3-4.2 1.4-.7-.1-1.3-.1-2 0-1.5-.1-2.8-.5-4.2-1.4.8.8 1.7 1.5 2.9 1.9-.4 1-.9 1.8-1.3 2.7-1-.3-2-.9-3.2-1.9 0-2.6.8-5 2.4-7.1Z"/><circle cx="10" cy="12" r="1"/><circle cx="14" cy="12" r="1"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v2.4M12 18.6V21M4.7 7.5l2.1 1.2M17.2 15.3l2.1 1.2M4.7 16.5l2.1-1.2M17.2 8.7l2.1-1.2"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M18.7 14.8A7.5 7.5 0 0 1 9.2 5.3a7 7 0 1 0 9.5 9.5Z"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v10M7.5 10.5 12 15l4.5-4.5"/><path d="M4.5 19.5h15"/></symbol>
   </defs>
 </svg>
 
@@ -349,8 +354,19 @@
       </div>
       <button class="icon-btn" id="updClose" aria-label="Close"><svg class="ic"><use href="#i-close"/></svg></button>
     </header>
-    <p class="sheet-note">A newer version is available. Your settings and cached tracks are kept.</p>
+    <p class="sheet-note" id="updLead">A newer version is available. Your settings and cached tracks are kept.</p>
     <div class="upd-notes" id="updNotes" hidden></div>
+    <div class="upd-progress" id="updProgress" hidden>
+      <div class="upd-progress-line">
+        <span id="updProgressText">Preparing download…</span>
+        <span class="upd-progress-pct" id="updProgressPct">0%</span>
+      </div>
+      <div class="meter upd-meter" id="updMeter" role="progressbar" aria-label="Update download progress"
+        aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <span id="updProgressBar"></span>
+      </div>
+      <p class="upd-progress-detail" id="updProgressDetail" aria-live="polite"></p>
+    </div>
     <div class="sheet-actions">
       <button class="btn ghost" id="updLater" type="button">Later</button>
       <button class="btn primary" id="updNow" type="button">Update &amp; restart</button>
@@ -360,46 +376,151 @@
 
 <div class="modal" id="setModal" hidden>
   <div class="modal-backdrop" id="setBackdrop"></div>
-  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="setTitle">
-    <header class="sheet-head">
-      <div>
-        <p class="eyebrow">Settings</p>
-        <h2 id="setTitle">Playback &amp; storage</h2>
+  <div class="sheet settings-sheet" role="dialog" aria-modal="true" aria-labelledby="setTitle">
+    <aside class="settings-sidebar" aria-label="Settings categories">
+      <div class="settings-side-head">
+        <h2 id="setTitle">Settings</h2>
+        <button class="icon-btn settings-close" id="setClose" aria-label="Close settings"><svg class="ic"><use href="#i-close"/></svg></button>
       </div>
-      <button class="icon-btn" id="setClose" aria-label="Close"><svg class="ic"><use href="#i-close"/></svg></button>
-    </header>
+      <nav class="settings-nav" role="tablist" aria-orientation="vertical" aria-label="Settings">
+        <button class="settings-nav-item is-active" role="tab" id="tab-cache" aria-controls="panel-cache" aria-selected="true" data-setting-tab="cache">
+          <svg class="ic"><use href="#i-database"/></svg>
+          <span>
+            <span class="settings-nav-title">Cache</span>
+            <span class="settings-nav-note">Storage and cleanup</span>
+          </span>
+        </button>
+        <button class="settings-nav-item" role="tab" id="tab-discord" aria-controls="panel-discord" aria-selected="false" data-setting-tab="discord">
+          <svg class="ic"><use href="#i-discord"/></svg>
+          <span>
+            <span class="settings-nav-title">Discord RPC</span>
+            <span class="settings-nav-note">Rich presence</span>
+          </span>
+        </button>
+        <button class="settings-nav-item" role="tab" id="tab-general" aria-controls="panel-general" aria-selected="false" data-setting-tab="general">
+          <svg class="ic"><use href="#i-gear"/></svg>
+          <span>
+            <span class="settings-nav-title">General</span>
+            <span class="settings-nav-note">Updates and app info</span>
+          </span>
+        </button>
+        <button class="settings-nav-item" role="tab" id="tab-appearance" aria-controls="panel-appearance" aria-selected="false" data-setting-tab="appearance">
+          <svg class="ic"><use href="#i-moon"/></svg>
+          <span>
+            <span class="settings-nav-title">Appearance</span>
+            <span class="settings-nav-note">Motion and ambience</span>
+          </span>
+        </button>
+      </nav>
+      <p class="settings-side-note">Settings are saved on this device.</p>
+    </aside>
 
-    <section class="set-block">
-      <div class="set-label">Cache limit</div>
-      <p class="set-note">Every track you play is kept on this PC, so playing it again is instant and offline. At the limit, the least recently played are removed first.</p>
-      <div class="seg" id="cacheLimit" role="radiogroup" aria-label="Cache limit">
-        <button class="seg-item" data-gb="5" role="radio" aria-checked="true">5 GB</button>
-        <button class="seg-item" data-gb="10" role="radio" aria-checked="false">10 GB</button>
-      </div>
-    </section>
+    <div class="settings-content">
+      <section class="settings-panel is-active" role="tabpanel" id="panel-cache" aria-labelledby="tab-cache" data-setting-panel="cache">
+        <header class="settings-panel-head">
+          <h3>Cache</h3>
+          <p>Control offline audio storage and remove cached tracks when you need space.</p>
+        </header>
 
-    <section class="set-block">
-      <div class="set-row">
-        <div>
-          <div class="set-label">Storage used</div>
-          <p class="set-note" id="cacheUsage">—</p>
-        </div>
-        <button class="btn sm" id="cacheClear" type="button">Clear cache</button>
-      </div>
-      <div class="meter" aria-hidden="true"><span id="cacheBar"></span></div>
-    </section>
+        <section class="settings-block">
+          <div class="settings-block-label">Cache limit</div>
+          <p class="settings-note">Every track you play is kept on this PC. At the limit, the least recently played tracks are removed first.</p>
+          <div class="seg" id="cacheLimit" role="radiogroup" aria-label="Cache limit">
+            <button class="seg-item on" data-gb="5" role="radio" aria-checked="true">5 GB</button>
+            <button class="seg-item" data-gb="10" role="radio" aria-checked="false">10 GB</button>
+          </div>
+        </section>
 
-    <section class="set-block">
-      <div class="set-row">
-        <div>
-          <div class="set-label">Version</div>
-          <p class="set-note" id="setVersion">—</p>
-        </div>
-        <button class="btn sm" id="setCheck" type="button">Check for updates</button>
-      </div>
-    </section>
+        <section class="settings-block">
+          <div class="settings-row">
+            <div>
+              <div class="settings-block-label">Storage used</div>
+              <p class="settings-note" id="cacheUsage">—</p>
+            </div>
+            <button class="btn sm" id="cacheClear" type="button">Clear cache</button>
+          </div>
+          <div class="meter" aria-hidden="true"><span id="cacheBar"></span></div>
+        </section>
 
-    <p class="sheet-note">The cache lives in your local app data, apart from the program files — updating or reinstalling never removes it.</p>
+        <p class="settings-foot">The cache lives in local app data, apart from program files. Updating or reinstalling never removes it.</p>
+      </section>
+
+      <section class="settings-panel" role="tabpanel" id="panel-discord" aria-labelledby="tab-discord" data-setting-panel="discord" hidden>
+        <header class="settings-panel-head">
+          <h3>Discord RPC</h3>
+          <p>Show what Esmeringhoy is playing in your Discord status.</p>
+        </header>
+
+        <section class="settings-block">
+          <div class="settings-row settings-option-row">
+            <div>
+              <div class="settings-block-label">Discord Rich Presence</div>
+              <p class="settings-note">Display your current track in Discord while the app is running. Uses the built-in application — no setup required. The large image switches to each track's artwork automatically.</p>
+            </div>
+            <button class="switch" id="discordEnabled" type="button" role="switch" aria-checked="false" aria-label="Enable Discord Rich Presence"><span class="switch-knob"></span></button>
+          </div>
+          <p class="settings-status" id="discordStatus" role="status">Disabled</p>
+        </section>
+      </section>
+
+      <section class="settings-panel" role="tabpanel" id="panel-general" aria-labelledby="tab-general" data-setting-panel="general" hidden>
+        <header class="settings-panel-head">
+          <h3>General</h3>
+          <p>Application information and update behavior.</p>
+        </header>
+
+        <section class="settings-block">
+          <div class="settings-row settings-option-row">
+            <div>
+              <div class="settings-block-label">Check for updates</div>
+              <p class="settings-note">Look for a new release shortly after Esmeringhoy starts.</p>
+            </div>
+            <button class="switch" id="autoUpdateToggle" type="button" role="switch" aria-checked="true" aria-label="Check for updates automatically"><span class="switch-knob"></span></button>
+          </div>
+        </section>
+
+        <section class="settings-block">
+          <div class="settings-row">
+            <div>
+              <div class="settings-block-label">Version</div>
+              <p class="settings-note" id="setVersion">—</p>
+            </div>
+            <button class="btn sm" id="setCheck" type="button">Check for updates</button>
+          </div>
+        </section>
+
+        <p class="settings-foot">Settings and cached tracks are stored in %LOCALAPPDATA%\dev.esmeringhoy.desktop, separate from the installation folder.</p>
+      </section>
+
+      <section class="settings-panel" role="tabpanel" id="panel-appearance" aria-labelledby="tab-appearance" data-setting-panel="appearance" hidden>
+        <header class="settings-panel-head">
+          <h3>Appearance</h3>
+          <p>Adjust the atmosphere and motion without changing the application’s identity.</p>
+        </header>
+
+        <section class="settings-block">
+          <div class="settings-row settings-option-row">
+            <div>
+              <div class="settings-block-label">Ambient artwork</div>
+              <p class="settings-note">Softly illuminate the background behind your library with the current album artwork.</p>
+            </div>
+            <button class="switch" id="ambientToggle" type="button" role="switch" aria-checked="true" aria-label="Show ambient artwork"><span class="switch-knob"></span></button>
+          </div>
+        </section>
+
+        <section class="settings-block">
+          <div class="settings-row settings-option-row">
+            <div>
+              <div class="settings-block-label">Reduce motion</div>
+              <p class="settings-note">Replace animated transitions and glowing effects with immediate feedback.</p>
+            </div>
+            <button class="switch" id="reduceMotionToggle" type="button" role="switch" aria-checked="false" aria-label="Reduce motion"><span class="switch-knob"></span></button>
+          </div>
+        </section>
+
+        <p class="settings-foot">The appearance is intentionally locked to the dark monochrome Esmeringhoy design.</p>
+      </section>
+    </div>
   </div>
 </div>
 
@@ -427,6 +548,6 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script type="module" src="/js/app.js?v=20261103m"></script>
+<script type="module" src="/js/app.js?v=20261106a"></script>
 </body>
 </html>

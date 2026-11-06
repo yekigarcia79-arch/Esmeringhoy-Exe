@@ -48,6 +48,8 @@ your mix (or skip it); the app then restores whatever was playing.
 - The title bar holds minimize, fullscreen and close; drag anywhere on the bar
   to move the window.
 - Click your username → **Settings** for playback and storage:
+  - **Queue pre-downloading** — when the current track has about 40 seconds left, the next tracks download in the background (2 at a time, in queue order, respecting the cache limit) so continuous playback has no gap. Statuses (**Waiting… / Downloading… / Downloaded / Cached / Failed / Cache full**) show on queue rows.
+  - **Discord RPC** — show the track in your own Discord status; works with the built-in Esmeringhoy application, no setup required. The large image switches to each track's own artwork as songs change.
   - cache limit: **5 GB** (default) or **10 GB**
   - how much is used and how many tracks are cached
   - **Clear cache** — playback keeps going; the track that is playing stays.
@@ -57,7 +59,6 @@ your mix (or skip it); the app then restores whatever was playing.
 Everything the app writes lives in `%LOCALAPPDATA%\dev.esmeringhoy.desktop`:
 
 ```
-settings.json   volume and cache limit
 cache\          one .m4a (AAC) per track, plus index.json
 web.log         interface errors, capped
 ```

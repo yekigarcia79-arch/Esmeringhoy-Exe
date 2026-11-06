@@ -9,13 +9,15 @@ use std::io::BufReader;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 use crate::engine::stream::{spawn_decoder, Ring, RingSource, Tail, TailFile, PREBUFFER_BYTES};
 
 pub const TICK_MS: u64 = 400;
 const STREAM_WHILE_DOWNLOADING: bool = false;
+const SEEK_END_GUARD_SECS: f64 = 0.5;
+const USER_SEEK_SUPPRESS_MS: u64 = 100;
 pub const POSITION_EVENT: &str = "player:position";
 pub const LOADING_EVENT: &str = "player:loading";
 pub const TRACK_EVENT: &str = "player:track-changed";
@@ -30,7 +32,11 @@ pub struct PlayingTrack {
     #[serde(default)]
     pub artist: String,
     #[serde(default)]
+    pub album: String,
+    #[serde(default)]
     pub duration: f64,
+    #[serde(default)]
+    pub thumb: String,
 }
 
 impl PlayingTrack {
@@ -44,11 +50,13 @@ impl PlayingTrack {
             video_id,
             title: t.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string(),
             artist: t.get("artist").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            album: t.get("album").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             duration: t
                 .get("duration")
                 .or_else(|| t.get("durationSec"))
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0),
+            thumb: t.get("thumb").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         })
     }
 }
@@ -64,6 +72,7 @@ pub struct EngineStateView {
 
 struct LoadCtl {
     loading: bool,
+    active: Option<String>,
     pending: Option<PlayingTrack>,
 }
 
@@ -78,6 +87,7 @@ pub struct Engine {
     cancel: Mutex<Option<Arc<AtomicBool>>>,
     tail: Mutex<Option<Arc<Tail>>>,
     streaming: AtomicBool,
+    suppress_auto_advance_until: Mutex<Option<Instant>>,
 }
 
 impl Engine {
@@ -91,11 +101,12 @@ impl Engine {
             current: Mutex::new(None),
             duration_hint: Mutex::new(Duration::ZERO),
             generation: AtomicU64::new(0),
-            ctl: Mutex::new(LoadCtl { loading: false, pending: None }),
+            ctl: Mutex::new(LoadCtl { loading: false, active: None, pending: None }),
             volume: Mutex::new(volume.clamp(0.0, 1.0)),
             cancel: Mutex::new(None),
             tail: Mutex::new(None),
             streaming: AtomicBool::new(false),
+            suppress_auto_advance_until: Mutex::new(None),
         })
     }
 
@@ -109,6 +120,15 @@ impl Engine {
         if let Some(p) = self.player.lock().unwrap().as_ref() {
             p.set_volume(v);
         }
+    }
+
+    pub fn is_player_empty(&self) -> bool {
+        self.player
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|p| p.empty())
+            .unwrap_or(true)
     }
 
     pub fn current(&self) -> Option<PlayingTrack> {
@@ -150,10 +170,17 @@ impl Engine {
         {
             let mut ctl = self.ctl.lock().unwrap();
             if ctl.loading {
+                // Duplicate load for the track that is already loading: both the
+                // engine's own ended-handler and the UI poll can ask at once.
+                // Loading it twice replays the intro — drop the duplicate.
+                if ctl.active.as_deref() == Some(track.video_id.as_str()) {
+                    return Ok(());
+                }
                 ctl.pending = Some(track);
                 return Ok(());
             }
             ctl.loading = true;
+            ctl.active = Some(track.video_id.clone());
         }
 
         let mut cur = Some(track);
@@ -165,9 +192,13 @@ impl Engine {
             }
             let mut ctl = self.ctl.lock().unwrap();
             match ctl.pending.take() {
-                Some(next) => cur = Some(next),
+                Some(next) => {
+                    ctl.active = Some(next.video_id.clone());
+                    cur = Some(next);
+                }
                 None => {
                     ctl.loading = false;
+                    ctl.active = None;
                     return Ok(());
                 }
             }
@@ -187,21 +218,27 @@ impl Engine {
         if let Some(cancel) = self.cancel.lock().unwrap().take() {
             cancel.store(true, Ordering::SeqCst);
         }
+        *self.tail.lock().unwrap() = None;
+        self.streaming.store(false, Ordering::SeqCst);
+        if let Some(p) = self.player.lock().unwrap().take() {
+            p.stop();
+        }
 
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let dur = match cache.lookup(&track.video_id) {
+        *self.suppress_auto_advance_until.lock().unwrap() = None;
+        let dur = match cache.lookup(&track.video_id, "m4a") {
             Some(path) => match self.open_player(app, api, cache, &track, &path, gen) {
                 Ok(d) => d,
                 Err(_) => {
-                    cache.remove(&track.video_id);
-                    self.fetch_then_play(app, api, cache, &track, gen).await?
+                    cache.remove(&track.video_id, "m4a");
+                    self.fetch_then_play(app, api, cache, &track, gen, "m4a").await?
                 }
             },
             None => {
                 if STREAM_WHILE_DOWNLOADING {
-                    self.stream_track(app, api, cache, &track, gen).await?
+                    self.stream_track(app, api, cache, &track, gen, "m4a").await?
                 } else {
-                    self.fetch_then_play(app, api, cache, &track, gen).await?
+                    self.fetch_then_play(app, api, cache, &track, gen, "m4a").await?
                 }
             }
         };
@@ -218,11 +255,13 @@ impl Engine {
         cache: &Arc<TrackCache>,
         track: &PlayingTrack,
         gen: u64,
+        ext: &str,
     ) -> Result<Duration> {
-        let dest = cache.path_for(&track.video_id, "m4a");
+        let dest = cache.path_for(&track.video_id, ext);
         let tail = Tail::new();
         let bytes = self.download_streaming(app, api, track, &dest, tail).await?;
-        cache.record(&track.video_id, "m4a", bytes);
+        validate_audio_file(&dest, ext)?;
+        cache.record(&track.video_id, ext, bytes);
         self.open_player(app, api, cache, track, &dest, gen)
     }
 
@@ -233,10 +272,13 @@ impl Engine {
         cache: &Arc<TrackCache>,
         track: &PlayingTrack,
         gen: u64,
+        ext: &str,
     ) -> Result<Duration> {
-        let dest = cache.path_for(&track.video_id, "m4a");
+        let dest = cache.path_for(&track.video_id, ext);
         let part = dest.with_extension("part");
         let _ = tokio::fs::remove_file(&part).await;
+        let ext = ext.to_string();
+        let ext_for_dl = ext.clone();
 
         let tail = Tail::new();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -255,7 +297,7 @@ impl Engine {
             tauri::async_runtime::spawn(async move {
                 match engine.download_streaming(&app, &api, &track, &dest, Arc::clone(&tail)).await {
                     Ok(bytes) => {
-                        cache.record(&track.video_id, "m4a", bytes);
+                        cache.record(&track.video_id, &ext_for_dl, bytes);
                         tail.finish();
                     }
                     Err(e) => {
@@ -345,7 +387,7 @@ impl Engine {
                             }),
                         );
                     }
-                })
+                }, None)
                 .await?;
             return Ok(bytes);
         }
@@ -369,6 +411,7 @@ impl Engine {
                         );
                     }
                 },
+                None,
             )
             .await?;
         Ok(bytes)
@@ -419,6 +462,38 @@ impl Engine {
                 if !still {
                     return;
                 }
+                if done && engine.take_auto_advance_suppression() {
+                    // The suppression window only exists to swallow a spurious "ended"
+                    // caused by a user-initiated seek near the end. If the player has
+                    // actually reached the end of the file, treat it as a real track
+                    // end and advance normally.
+                    let reached_end = {
+                        let player = engine.player.lock().unwrap();
+                        player.as_ref().map(|p| p.empty() || p.get_pos().as_secs_f64() >= dur - 0.5).unwrap_or(false)
+                    };
+                    if reached_end {
+                        engine.on_track_ended(&app, &api, &cache, gen).await;
+                        return;
+                    }
+                    if let Some(p) = engine.player.lock().unwrap().as_ref() {
+                        p.pause();
+                    }
+                    let _ = app.emit(
+                        POSITION_EVENT,
+                        json!({ "pos": pos, "duration": dur, "state": "paused" }),
+                    );
+                    if engine.generation.load(Ordering::SeqCst) != gen {
+                        return;
+                    }
+                    let _ = api
+                        .call(
+                            "POST",
+                            "/api/cmd",
+                            Some(json!({ "cmd": "transport", "state": "paused" })),
+                        )
+                        .await;
+                    return;
+                }
                 if done {
                     engine.on_track_ended(&app, &api, &cache, gen).await;
                     return;
@@ -441,7 +516,12 @@ impl Engine {
         *self.tail.lock().unwrap() = None;
 
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        let decoder = Decoder::new(BufReader::new(file))
+        let file_len = file.metadata().context("reading track metadata")?.len();
+        let decoder = rodio::decoder::DecoderBuilder::new()
+            .with_data(BufReader::new(file))
+            .with_byte_len(file_len)
+            .with_seekable(true)
+            .build()
             .context("could not decode that track (unsupported format)")?;
         let duration = decoder
             .total_duration()
@@ -517,11 +597,28 @@ impl Engine {
         }
     }
 
+    fn take_auto_advance_suppression(&self) -> bool {
+        let mut suppression = self.suppress_auto_advance_until.lock().unwrap();
+        let Some(until) = suppression.take() else {
+            return false;
+        };
+        Instant::now() <= until
+    }
+
     pub fn seek(&self, secs: f64) -> Result<()> {
+        let dur = *self.duration_hint.lock().unwrap();
+        let mut target = secs.max(0.0);
+        if dur > Duration::from_secs(1) {
+            target = target.min(dur.as_secs_f64() - SEEK_END_GUARD_SECS);
+        }
+
         let player = self.player.lock().unwrap();
         let p = player.as_ref().ok_or_else(|| anyhow!("nothing is playing"))?;
-        p.try_seek(Duration::from_secs_f64(secs.max(0.0)))
-            .map_err(|e| anyhow!("seek failed: {e}"))
+        p.try_seek(Duration::from_secs_f64(target))
+            .map_err(|e| anyhow!("seek failed: {e}"))?;
+        *self.suppress_auto_advance_until.lock().unwrap() =
+            Some(Instant::now() + Duration::from_millis(USER_SEEK_SUPPRESS_MS));
+        Ok(())
     }
 
     pub fn stop(&self) {
@@ -535,6 +632,7 @@ impl Engine {
         }
         *self.current.lock().unwrap() = None;
         *self.duration_hint.lock().unwrap() = Duration::ZERO;
+        *self.suppress_auto_advance_until.lock().unwrap() = None;
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -546,5 +644,45 @@ pub mod player_util {
             && id
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }
+}
+
+/// Refuse to cache a download whose container is not MP4/AAC audio.
+fn validate_audio_file(path: &Path, _ext: &str) -> Result<()> {
+    use std::io::Read;
+    let mut f = File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut head = [0u8; 12];
+    let n = f.read(&mut head).unwrap_or(0);
+    if n >= 8 && head[4..8] == *b"ftyp" {
+        Ok(())
+    } else {
+        let _ = std::fs::remove_file(path);
+        Err(anyhow!("downloaded file is not an M4A/AAC stream"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn from_snapshot_parses_thumb_and_album() {
+        let v = json!({
+            "videoId": "abc123_def",
+            "title": "Song",
+            "artist": "Artist",
+            "album": "ALB",
+            "duration": 181.0,
+            "thumb": "https://i.ytimg.com/vi/abc123_def/maxresdefault.jpg",
+        });
+        let t = PlayingTrack::from_snapshot_current(&v).expect("parses");
+        assert_eq!(t.thumb, "https://i.ytimg.com/vi/abc123_def/maxresdefault.jpg");
+        assert_eq!(t.album, "ALB");
+        assert!((t.duration - 181.0).abs() < f64::EPSILON);
+
+        let bare = json!({ "videoId": "abc123_def", "title": "Song" });
+        let t = PlayingTrack::from_snapshot_current(&bare).expect("parses without extras");
+        assert!(t.thumb.is_empty() && t.album.is_empty());
     }
 }

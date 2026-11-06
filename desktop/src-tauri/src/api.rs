@@ -159,6 +159,7 @@ impl ApiClient {
         url_or_path: &str,
         dest: &Path,
         mut on_progress: impl FnMut(u64, Option<u64>),
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<u64> {
         const CHUNK: u64 = 1 << 20;
         let is_absolute =
@@ -211,6 +212,10 @@ impl ApiClient {
             let mut stream = res.bytes_stream();
             let mut wrote: u64 = 0;
             while let Some(chunk) = stream.next().await {
+                if cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    return Err(anyhow!("download cancelled"));
+                }
                 let chunk = chunk.context("range stream broke")?;
                 file.write_all(&chunk).await.context("writing part file")?;
                 file.flush().await.context("flushing part file")?;

@@ -1,6 +1,8 @@
 use crate::api::ApiClient;
 use crate::cache::TrackCache;
+use crate::discord::DiscordRpc;
 use crate::engine::Engine;
+use crate::preload::Preloader;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -14,16 +16,48 @@ fn default_cache_gb() -> u64 {
     DEFAULT_CACHE_GB
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_logo() -> String {
+    "logo".to_string()
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Prefs {
     pub volume: f32,
     #[serde(default = "default_cache_gb")]
     pub cache_limit_gb: u64,
+    #[serde(default = "default_true")]
+    pub auto_update_check: bool,
+    #[serde(default = "default_true")]
+    pub ambient_artwork: bool,
+    #[serde(default)]
+    pub reduce_motion: bool,
+    #[serde(default)]
+    pub discord_rpc_enabled: bool,
+    #[serde(default)]
+    pub discord_client_id: String,
+    #[serde(default = "default_logo")]
+    pub discord_large_image_key: String,
+    #[serde(default = "default_logo")]
+    pub discord_small_image_key: String,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { volume: 0.7, cache_limit_gb: DEFAULT_CACHE_GB }
+        Self {
+            volume: 0.7,
+            cache_limit_gb: DEFAULT_CACHE_GB,
+            auto_update_check: true,
+            ambient_artwork: true,
+            reduce_motion: false,
+            discord_rpc_enabled: false,
+            discord_client_id: String::new(),
+            discord_large_image_key: default_logo(),
+            discord_small_image_key: default_logo(),
+        }
     }
 }
 
@@ -36,6 +70,8 @@ pub struct AppState {
     pub api: Arc<ApiClient>,
     pub cache: Arc<TrackCache>,
     pub engine: Arc<Engine>,
+    pub discord: Arc<DiscordRpc>,
+    pub preloader: Arc<Preloader>,
     pub prefs: Mutex<Prefs>,
     pub prefs_path: PathBuf,
 }
@@ -55,9 +91,12 @@ impl AppState {
 
         let base = std::env::var(ENV_API_BASE).unwrap_or_else(|_| crate::api::DEFAULT_BASE_URL.to_string());
         let api = Arc::new(ApiClient::new(&base));
+        let prefs_for_rpc = prefs.clone();
         let engine = Arc::new(Engine::new(prefs.volume).context("audio engine failed to start")?);
+        let discord = Arc::new(DiscordRpc::new(&prefs_for_rpc));
+        let preloader = Preloader::new(Arc::clone(&api), Arc::clone(&cache));
 
-        Ok(Self { api, cache, engine, prefs: Mutex::new(prefs), prefs_path })
+        Ok(Self { api, cache, engine, discord, preloader, prefs: Mutex::new(prefs), prefs_path })
     }
 
     pub fn set_cache_limit(&self, gb: u64) -> Result<()> {

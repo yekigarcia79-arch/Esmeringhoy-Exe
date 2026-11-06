@@ -33,6 +33,23 @@ async function netFetch(path, opts = {}) {
 
 const $ = (sel, root = document) => root.querySelector(sel);
 
+const DEFAULT_SETTINGS = {
+  autoUpdateCheck: true,
+  ambientArtwork: true,
+  reduceMotion: false,
+  discord: {
+    enabled: false,
+    status: 'Disabled',
+  },
+};
+let settingsState = { ...DEFAULT_SETTINGS, discord: { ...DEFAULT_SETTINGS.discord } };
+let settingsTab = 'cache';
+let preloadSig = '';
+const preloadStatus = new Map();
+const downloadedIds = new Set();
+let dlAllBusy = false;
+const PRELOAD_WINDOW_SECS = 40;
+
 let S = null;
 let me = null;
 let pollTimer = null;
@@ -250,6 +267,43 @@ async function send(cmd, extra = {}, opts = {}) {
   }
 }
 
+const SEEK_EMIT_MS = 120;
+const SEEK_END_GUARD_SECS = 0.5;
+let seekTimer = null;
+let seekTarget = null;
+let lastSeekErrorAt = 0;
+
+function logSeekError(e) {
+  try {
+    invoke('web_log', { message: `[seek] ${e}` });
+  } catch {}
+  const now = Date.now();
+  if (now - lastSeekErrorAt > 2000) {
+    lastSeekErrorAt = now;
+    toast('Could not seek');
+  }
+}
+
+function queueSeek(secs) {
+  seekTarget = Math.max(0, Number(secs) || 0);
+  if (seekTimer) return;
+  seekTimer = setTimeout(() => {
+    const target = seekTarget;
+    seekTimer = null;
+    seekTarget = null;
+    invoke('engine_seek', { secs: target }).catch(logSeekError);
+  }, SEEK_EMIT_MS);
+}
+
+function flushPendingSeek() {
+  if (!seekTimer) return;
+  clearTimeout(seekTimer);
+  seekTimer = null;
+  const target = seekTarget;
+  seekTarget = null;
+  invoke('engine_seek', { secs: target }).catch(logSeekError);
+}
+
 const audio = {
   _pos: 0, _dur: 0, _paused: true, _ended: false,
   _at: 0,
@@ -261,14 +315,17 @@ const audio = {
   set currentTime(t) {
     this._pos = Math.max(0, Number(t) || 0);
     this._at = performance.now();
-    invoke('engine_seek', { secs: this._pos }).catch(() => {});
+    queueSeek(this._pos);
   },
   get duration() { return this._dur; },
   get paused() { return this._paused; },
   get ended() { return this._ended; },
-  set volume(v) { invoke('engine_set_volume', { volume: v }).catch(() => {}); },
-  play() { this._paused = false; this._at = performance.now(); },
-  pause() { this._paused = true; },
+  set volume(v) {
+    lastVolumeSent = v;
+    invoke('engine_set_volume', { volume: v }).catch(() => {});
+  },
+  play() { this._paused = false; this._at = performance.now(); return Promise.resolve(); },
+  pause() { this._paused = true; return Promise.resolve(); },
   load() {},
   removeAttribute() {},
 };
@@ -276,6 +333,8 @@ const audio = {
 let engineTrackId = '';
 let engineSeq = -1;
 let pendingSeek = null;
+let lastLoadStartedAt = 0;
+let lastVolumeSent = NaN;
 
 let enginePlayingId = '';
 let engineState = 'idle';
@@ -285,11 +344,14 @@ let claimedAt = 0;
 function applyVolume(s) {
   const gain = Math.min(1, Number(s.gain) || 1);
   const target = Math.max(0, Math.min(1, (Number(s.volume) || 0) / 100 * gain));
+  if (Number.isFinite(lastVolumeSent) && Math.abs(lastVolumeSent - target) < 0.005) return;
+  lastVolumeSent = target;
   invoke('engine_set_volume', { volume: target }).catch(() => {});
 }
 
 async function loadEngineTrack(track, transport) {
   try {
+    lastLoadStartedAt = Date.now();
     await invoke('engine_load', { track });
     if (pendingSeek && pendingSeek.id === track.videoId) {
       const t = pendingSeek.t;
@@ -320,9 +382,15 @@ function reconcileEngine(s) {
   if (id) {
     const fresh = id !== engineTrackId;
     const restarted = !fresh && seq !== engineSeq;
+    // Never call engine_load for a track the engine has already adopted
+    // through player:track-changed — that is the double-intro.
+    const engineAdopted = enginePlayingId === id && engineState === 'playing';
+    // A seq bump right after we just started this track is the server echoing
+    // our own advance, not a real restart — don't reload inside the window.
+    const justLoaded = id === engineTrackId && Date.now() - lastLoadStartedAt < 3000;
     engineTrackId = id;
     engineSeq = seq;
-    if (fresh || (restarted && s.transport === 'loading')) loadEngineTrack(cur, s.transport);
+    if ((fresh || (restarted && s.transport === 'loading' && !justLoaded)) && !engineAdopted) loadEngineTrack(cur, s.transport);
     else invoke('engine_set_transport', { transport: s.transport || 'idle' }).catch(() => {});
   } else if (engineTrackId) {
     engineTrackId = '';
@@ -397,14 +465,75 @@ listen('player:track-changed', (e) => {
   try {
     const id = e?.payload?.track?.videoId || engineTrackId;
     enginePlayingId = id;
+    engineTrackId = id;
+    engineSeq = Number(S?.playSeq) || engineSeq;
     engineState = 'playing';
     audio._pos = 0;
     audio._at = performance.now();
+    preloadSig = '';
     claimPlaying(id);
     renderPlayer();
+    invoke('discord_rpc_sync').catch(() => {});
     topUpQueue();
   } catch {}
 });
+listen('preload:status', (e) => {
+  const p = e?.payload || {};
+  if (!p.videoId || !p.status) return;
+  preloadStatus.set(p.videoId, p.status);
+  paintPreloadStatus(p.videoId, p.status);
+});
+listen('cache:download', (e) => {
+  const p = e?.payload || {};
+  if (!p.videoId) return;
+  if (p.status === 'done' || p.status === 'cached') {
+    downloadedIds.add(p.videoId);
+    document.querySelectorAll(`[data-dlcheck="${CSS.escape(p.videoId)}"]`).forEach((el) => {
+      el.classList.remove('is-hidden');
+    });
+  }
+});
+
+async function refreshDownloadedBadges() {
+  if (!plDetail?.tracks?.length) return;
+  try {
+    const ids = plDetail.tracks.map((t) => t.videoId).filter(Boolean);
+    const cached = await invoke('cached_tracks', { ids });
+    (cached || []).forEach((id) => downloadedIds.add(id));
+    downloadedIds.forEach((id) => {
+      document.querySelectorAll(`[data-dlcheck="${CSS.escape(id)}"]`).forEach((el) => {
+        el.classList.remove('is-hidden');
+      });
+    });
+  } catch {}
+}
+
+function paintPreloadStatus(videoId, status) {  const labels = {
+    waiting: 'Waiting…',
+    downloading: 'Downloading…',
+    done: 'Downloaded',
+    cached: 'Cached',
+    failed: 'Failed',
+    full: 'Cache full',
+  };
+  const label = labels[status] || status;
+  document.querySelectorAll(`[data-qstat="${CSS.escape(videoId)}"]`).forEach((el) => {
+    el.textContent = label;
+    el.dataset.status = status;
+  });
+}
+
+function maybePreload() {
+  if (!S || !S.current || !S.queue?.length) return;
+  const dur = audio.duration;
+  if (!dur || !isFinite(dur) || dur <= 0) return;
+  const remaining = dur - (audio.currentTime || 0);
+  if (remaining > PRELOAD_WINDOW_SECS) return;
+  const sig = S.current.videoId + '|' + S.queue.map((t) => t.videoId).join(',');
+  if (sig === preloadSig) return;
+  preloadSig = sig;
+  invoke('cache_preload', { tracks: S.queue.slice(0, 8) }).catch(() => {});
+}
 const QUEUE_LOW = 2;
 const QUEUE_TOPUP = 5;
 let toppingUp = false;
@@ -444,9 +573,11 @@ listen('player:idle', () => {
   enginePlayingId = '';
   engineState = 'idle';
   if (S) { S.transport = 'idle'; try { renderPlayer(); } catch {} }
+  invoke('discord_rpc_sync').catch(() => {});
 });
 
 let scrubbing = false;
+let volumeDragging = false;
 
 let videoMode = false;
 let videoEl = null;
@@ -739,6 +870,10 @@ function apply(snap) {
 
   reconcileEngine(snap);
 
+  audio._paused = S.transport !== 'playing';
+  if (audio._paused) audio._at = 0;
+  else if (!audio._at) audio._at = performance.now();
+
   if (engineIsPlayingCurrent()) claimPlaying(S.current.videoId);
 
   if (S.transport === 'paused' && S.current?.videoId && enginePlayingId === S.current.videoId) {
@@ -840,14 +975,22 @@ function renderPlayer() {
   rep.title = ['Repeat off', 'Repeat all', 'Repeat one'][S.repeat];
   rep.setAttribute('aria-pressed', S.repeat !== 0 ? 'true' : 'false');
 
-  $('#btnNext').disabled = !(S.queueCount > 0);
+  $('#btnNext').disabled = !(S.queueCount > 0 || S.playlistActive);
 
-  $('#volume').value = S.volume;
-  setFill($('#volume'), S.volume);
-  $('#volNum').textContent = S.volume;
+  if (!volumeDragging) {
+    $('#volume').value = S.volume;
+    setFill($('#volume'), S.volume);
+    $('#volNum').textContent = S.volume;
+  }
 
   const dur = audio.duration && isFinite(audio.duration) ? audio.duration : has ? cur.durationSec : 0;
   $('#tDur').textContent = fmt(dur);
+}
+
+function setScaleX(el, pct) {
+  if (!el) return;
+  const value = Math.max(0, Math.min(100, pct || 0)) / 100;
+  el.style.transform = `scaleX(${value})`;
 }
 
 function setFill(input, pct) {
@@ -858,11 +1001,11 @@ function setFill(input, pct) {
 function viewSignature() {
   if (!S) return '';
   switch (S.view) {
-    case 'search': return `search:${S.results.length}:${S.status}:${S.artistHit?.browseId || ''}`;
+    case 'search': return `search:${S.results.length}:${S.searching ? 1 : 0}:${S.artistHit?.browseId || ''}`;
     case 'artist': return `ar:${artistDetail?.id || ''}:${artistDetail?.loading ? 1 : 0}:${artistDetail?.tracks?.length ?? -1}:${(S.selectedArtists || []).includes(artistDetail?.name) ? 1 : 0}`;
     case 'mix': return `mix:${S.mix?.length}:${S.mixLoading}:${S.selectedArtists.join(',')}`;
     case 'playlists': return `pl:${plDetail?.id || ''}:${plDetail?.tracks?.length ?? -1}:${S.playlists.length}`;
-    case 'queue': return `q:${S.queueCount}:${S.current?.videoId || ''}:${S.transport}`;
+    case 'queue': return `q:${S.queueCount}:${S.current?.videoId || ''}`;
     case 'lyrics': return `ly:${S.current?.videoId || ''}:${S.lyrics?.source || ''}:${S.lyrics?.lines?.length || 0}:${videoMode ? 1 : 0}`;
     case 'now': return `now:${S.current?.videoId || ''}:${videoMode ? 1 : 0}`;
     default: return `home:${S.picks.length}:${S.jump.length}:${CAT.trending.length}:${S.mixCount}`;
@@ -892,22 +1035,20 @@ function renderView() {
   }
 
   $('#content').scrollTop = scroll;
+  lyrLineNodes = S.view === 'lyrics' ? [...document.querySelectorAll('.lyr-line')] : [];
   mountVideo();
   refreshLiveBits();
 }
 
 function refreshLiveBits() {
   if (S.view === 'lyrics') updateLyricHighlight(true);
-  if (S.view === 'queue') {
-    const bar = $('.now-card .mini-bar i');
-    if (bar && audio.duration) bar.style.width = `${(audio.currentTime / audio.duration) * 100}%`;
-  }
+  if (S.view === 'queue') paintQueueProgress(audio.currentTime, audio.duration);
 }
 
 function trackRow(t, i, opts = {}) {
   const isCurrent = S.current && S.current.videoId === t.videoId;
   const actions = [];
-  const playAct = opts.queueMode ? 'queueplay' : 'play';
+  const playAct = opts.playlistId ? 'plplayat' : opts.queueMode ? 'queueplay' : 'play';
 
   if (opts.playlistId) {
     actions.push(
@@ -923,13 +1064,14 @@ function trackRow(t, i, opts = {}) {
   }
 
   return `
-    <div class="row ${isCurrent ? 'on is-current' : ''}" style="--i:${i}" data-act="${playAct}" data-i="${i}" tabindex="0" role="button" aria-label="Play ${esc(t.title)}">
+    <div class="row ${isCurrent ? 'on is-current' : ''}" style="--i:${i}" data-act="${playAct}" data-i="${i}" data-vid="${esc(t.videoId || '')}" tabindex="0" role="button" aria-label="Play ${esc(t.title)}">
       <div class="r-idx">${isCurrent ? '<span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>' : i + 1}</div>
       <div class="r-art">${art(t.thumb, t.title, '', 120)}<span class="play-hint">${icon('play')}</span></div>
       <div class="r-main">
         <div class="r-title">${esc(t.title)}</div>
         <div class="r-sub">${esc(t.artist || 'Unknown artist')}</div>
       </div>
+      <span class="dl-ok${downloadedIds.has(t.videoId) ? '' : ' is-hidden'}" data-dlcheck="${esc(t.videoId || '')}" title="Downloaded">${icon('check')}</span>
       <div class="r-album">${esc(t.album || t.plays || '')}</div>
       <div class="r-dur">${t.durationSec ? fmt(t.durationSec) : '—'}</div>
       <div class="r-act">${actions.join('')}</div>
@@ -1222,19 +1364,10 @@ function importProgress(done, total, label) {
   const bar = $('#plLoadBar');
   if (text) text.textContent = label || `Matching ${done} of ${total}…`;
   if (num) num.textContent = `${pct}%`;
-  if (bar) bar.style.width = `${pct}%`;
+  if (bar) setScaleX(bar, pct);
 }
 
-async function importPlaylistFile(file) {
-  if (!file || importBusy) return;
-
-  const text = await file.text().catch(() => '');
-  const { rows, skipped } = parsePlaylistExport(text);
-  if (!rows.length) {
-    toast('No tracks found in that file');
-    return;
-  }
-
+async function matchAndSave(rows, name, skipped = 0) {
   importBusy = true;
   importAbort = false;
   importProgress(0, rows.length, `Matching 0 of ${rows.length}…`);
@@ -1270,13 +1403,12 @@ async function importPlaylistFile(file) {
       return;
     }
     if (!tracks.length) {
-      toast('Nothing in that file could be matched');
+      toast('Nothing could be matched');
       return;
     }
 
     importProgress(rows.length, rows.length, 'Saving…');
 
-    const name = file.name.replace(/\.[^.]+$/, '').trim().slice(0, 60) || 'From Spotify';
     const snap = await send('playlistImport', { name, tracks });
     const id = snap?.lastPlaylistId;
 
@@ -1296,14 +1428,72 @@ async function importPlaylistFile(file) {
     const run = $('#plLoadRun');
     if (run) run.hidden = true;
     const bar = $('#plLoadBar');
-    if (bar) bar.style.width = '0%';
+    if (bar) setScaleX(bar, 0);
     const input = $('#plFile');
     if (input) input.value = '';
   }
 }
 
+async function importPlaylistFile(file) {
+  if (!file || importBusy) return;
+
+  const text = await file.text().catch(() => '');
+  const { rows, skipped } = parsePlaylistExport(text);
+  if (!rows.length) {
+    toast('No tracks found in that file');
+    return;
+  }
+
+  const name = file.name.replace(/\.[^.]+$/, '').trim().slice(0, 60) || 'From Spotify';
+  await matchAndSave(rows, name, skipped);
+}
+
+async function importPlaylistUrl(url) {
+  if (importBusy) return;
+  const link = String(url || '').trim();
+  if (!link) {
+    toast('Paste a Spotify playlist link first');
+    return;
+  }
+
+  importBusy = true;
+  try {
+    importProgress(0, 1, 'Reading playlist…');
+    const res = await netFetch('/api/import/spotify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: link }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(data.error || `Could not read that playlist (${res.status})`);
+      return;
+    }
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    if (!rows.length) {
+      toast('No tracks found in that playlist');
+      return;
+    }
+    importBusy = false;
+    await matchAndSave(rows, data.name || 'From Spotify');
+  } catch {
+    toast('Could not read that playlist');
+  } finally {
+    importBusy = false;
+    const run = $('#plLoadRun');
+    if (run) run.hidden = true;
+  }
+}
+
 document.addEventListener('change', (e) => {
   if (e.target?.id === 'plFile') importPlaylistFile(e.target.files?.[0]);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.target?.id === 'plUrl' && e.key === 'Enter') {
+    e.preventDefault();
+    importPlaylistUrl(e.target.value || '');
+  }
 });
 
 document.addEventListener('dragover', (e) => {
@@ -1344,6 +1534,7 @@ function renderPlaylistsView() {
           <div class="pl-actions">
             <button class="btn primary" data-act="plplay" ${viewList.length ? '' : 'disabled'}>Play</button>
             <button class="btn" data-act="plshuffle" ${viewList.length ? '' : 'disabled'}>Shuffle &amp; play</button>
+            <button class="btn" data-act="pldownload" ${viewList.length && !dlAllBusy ? '' : 'disabled'} title="Download every track in this playlist">${icon('download')} Download all</button>
             <button class="btn ghost" data-act="plrename">Rename</button>
             <button class="btn ghost" data-act="pldelete">Delete</button>
           </div>
@@ -1378,10 +1569,15 @@ function renderPlaylistsView() {
 
     <div class="sec" style="margin-top:34px"><div>
       <h2>Load from Spotify</h2>
-      <p class="sub">Export any playlist with <a class="link" href="https:
+      <p class="sub">Paste a public playlist link, or export any playlist with <a class="link" href="https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M" target="_blank" rel="noopener">Spotify</a> and drop the file on the box below.</p>
     </div></div>
     <div class="pl-load" id="plLoad">
       <input type="file" id="plFile" accept=".csv,text/csv,.json,application/json,.txt" hidden>
+      <div class="pl-url-row">
+        <input id="plUrl" type="url" placeholder="Paste a Spotify playlist link…" autocomplete="off" spellcheck="false" aria-label="Spotify playlist link">
+        <button type="button" class="btn sm" data-act="plurl">Load link</button>
+      </div>
+      <div class="pl-drop-sep">or</div>
       <button type="button" class="pl-drop" data-act="plpick">
         <span class="pl-drop-big">Choose a CSV</span>
         <span class="pl-drop-sub">or drop the file on this box</span>
@@ -1573,6 +1769,85 @@ function glideTo(box, top) {
   glideRaf = requestAnimationFrame(step);
 }
 
+function resetSplitLyricLine(el) {
+  if (!el || !el.dataset.layout) return;
+  el.textContent = el.dataset.raw || el.textContent;
+  el.classList.remove('split');
+  delete el.dataset.layout;
+  delete el.dataset.raw;
+}
+
+function resetSplitLyricLines() {
+  document.querySelectorAll('.lyr-line[data-layout]').forEach(resetSplitLyricLine);
+}
+
+function splitLyricLine(el) {
+  if (!el) return null;
+  if (el.dataset.layout === 'single') return null;
+  if (el.dataset.layout === 'split') {
+    return [...el.querySelectorAll('.lyr-vline')];
+  }
+
+  const raw = el.textContent || '';
+  el.dataset.raw = raw;
+  const tokens = raw.split(/(\s+)/).filter(Boolean);
+  if (!tokens.length) {
+    el.dataset.layout = 'single';
+    delete el.dataset.raw;
+    return null;
+  }
+
+  el.innerHTML = tokens.map((token) => `<span class="lyr-word">${esc(token)}</span>`).join('');
+  const words = [...el.querySelectorAll('.lyr-word')];
+  const groups = [];
+  let line = [];
+  let currentTop = null;
+
+  for (const word of words) {
+    const top = word.offsetTop;
+    if (currentTop === null || Math.abs(top - currentTop) < 4) {
+      line.push(word.textContent || '');
+      currentTop = currentTop ?? top;
+    } else {
+      groups.push(line.join(''));
+      line = [word.textContent || ''];
+      currentTop = top;
+    }
+  }
+  if (line.length) groups.push(line.join(''));
+
+  if (groups.length <= 1) {
+    el.textContent = raw;
+    el.dataset.layout = 'single';
+    delete el.dataset.raw;
+    return null;
+  }
+
+  el.innerHTML = groups
+    .map((group) => `<span class="lyr-vline">${esc(group)}</span>`)
+    .join('');
+  el.dataset.layout = 'split';
+  el.classList.add('split');
+  return [...el.querySelectorAll('.lyr-vline')];
+}
+
+function setLyricLineProgress(el, p) {
+  if (!el) return;
+  const vlines = splitLyricLine(el);
+  if (!vlines) {
+    el.style.setProperty('--p', `${(Math.max(0, Math.min(1, p)) * 100).toFixed(1)}%`);
+    return;
+  }
+
+  const weights = vlines.map((vline) => Math.max(1, (vline.textContent || '').trim().length));
+  let remaining = Math.max(0, Math.min(1, p)) * weights.reduce((total, weight) => total + weight, 0);
+  vlines.forEach((vline, i) => {
+    const local = Math.max(0, Math.min(1, remaining / weights[i]));
+    vline.style.setProperty('--p', `${(local * 100).toFixed(1)}%`);
+    remaining -= weights[i];
+  });
+}
+
 function updateLyricHighlight(force = false) {
   if (!S || S.view !== 'lyrics' || videoMode) return;
   const lyr = S.lyrics;
@@ -1584,14 +1859,18 @@ function updateLyricHighlight(force = false) {
     if (lyr.lines[i].t <= pos) idx = i;
     else break;
   }
-  const nodes = document.querySelectorAll('.lyr-line');
+  const nodes = lyrLineNodes;
+  if (!nodes.length) return;
 
   if (idx !== lastLyricIdx || force) {
     lastLyricIdx = idx;
     nodes.forEach((n, i) => {
       n.classList.toggle('now', i === idx);
       n.classList.toggle('past', i < idx);
-      if (i !== idx) n.style.removeProperty('--p');
+      if (i !== idx) {
+        n.style.removeProperty('--p');
+        n.querySelectorAll('.lyr-vline').forEach((vline) => vline.style.removeProperty('--p'));
+      }
     });
 
     const active = nodes[idx];
@@ -1609,9 +1888,15 @@ function updateLyricHighlight(force = false) {
     const next = lyr.lines[idx + 1];
     const span = next ? Math.max(0.5, next.t - line.t) : 4;
     const p = Math.max(0, Math.min(1, (pos - line.t) / span));
-    nodes[idx]?.style.setProperty('--p', `${(p * 100).toFixed(1)}%`);
+    setLyricLineProgress(nodes[idx], p);
   }
 }
+
+window.addEventListener('resize', () => {
+  resetSplitLyricLines();
+  lastLyricIdx = -2;
+  if (S?.view === 'lyrics') updateLyricHighlight(true);
+});
 
 let gateSig = '';
 
@@ -2053,12 +2338,16 @@ $('#npArt').addEventListener('click', () => {
 $('#npAdd').addEventListener('click', () => openPlaylistModal(S?.current));
 
 $('#volume').addEventListener('input', (e) => {
+  volumeDragging = true;
   const v = Number(e.target.value);
   setFill(e.target, v);
   $('#volNum').textContent = v;
   audio.volume = Math.max(0, Math.min(1, v / 100));
 });
-$('#volume').addEventListener('change', (e) => send('volume', { pct: Number(e.target.value) }, { silent: true }));
+$('#volume').addEventListener('change', (e) => {
+  volumeDragging = false;
+  send('volume', { pct: Number(e.target.value) }, { silent: true });
+});
 
 $('#btnMute').addEventListener('click', () => {
   const v = S?.volume > 0 ? 0 : 70;
@@ -2069,11 +2358,15 @@ $('#seek').addEventListener('input', (e) => {
   scrubbing = true;
   const dur = audio.duration || 0;
   if (!dur) return;
-  const want = Math.min(dur, Math.max(0, Number(e.target.value) || 0));
+  const safeEnd = Math.max(0, dur - SEEK_END_GUARD_SECS);
+  const want = Math.min(safeEnd, Math.max(0, Number(e.target.value) || 0));
   audio.currentTime = want;
   setFill(e.target, (want / dur) * 100);
 });
-$('#seek').addEventListener('change', () => { scrubbing = false; });
+$('#seek').addEventListener('change', () => {
+  flushPendingSeek();
+  scrubbing = false;
+});
 
 $('#view').addEventListener('click', (e) => {
   const line = e.target.closest('.lyr-line[data-t]');
@@ -2214,16 +2507,33 @@ $('#view').addEventListener('click', async (e) => {
       plDetail = res.ok ? await res.json() : null;
       lastViewSig = '';
       renderView();
+      refreshDownloadedBadges();
       break;
     }
     case 'plpick':
       $('#plFile')?.click();
+      break;
+    case 'plurl':
+      importPlaylistUrl($('#plUrl')?.value || '');
       break;
     case 'plcancel':
       if (importBusy) {
         importAbort = true;
         toast('Stopping…');
       }
+      break;
+    case 'plplayat':
+      if (plDetail?.tracks?.length) send('playlistPlay', { id: plDetail.id, index: i });
+      break;
+    case 'pldownload':
+      if (dlAllBusy || !plDetail?.tracks?.length) break;
+      dlAllBusy = true;
+      lastViewSig = '';
+      renderView();
+      toast('Downloading playlist in the background…');
+      invoke('cache_download_all', { tracks: plDetail.tracks }).then(() => {
+        dlAllBusy = false; lastViewSig = ''; renderView(); refreshDownloadedBadges();
+      }).catch(() => { dlAllBusy = false; toast('Could not start downloads'); });
       break;
     case 'plback':
       plDetail = null;
@@ -2337,6 +2647,23 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+let lastSeekMax = -1;
+let lastSeekVal = -1;
+let lastCurText = '';
+let lastDurText = '';
+let lyrLineNodes = [];
+
+function paintQueueProgress(pos, dur) {
+  const bar = $('.now-card .mini-bar i');
+  if (bar && dur) setScaleX(bar, (pos / dur) * 100);
+  const label = $('.now-card-label');
+  if (label) {
+    label.textContent = S.transport === 'playing' ? 'Now playing' : S.transport === 'paused' ? 'Paused' : 'Up next';
+  }
+  const toggle = $('.now-card .pl-actions .btn.primary');
+  if (toggle) toggle.textContent = S.transport === 'playing' ? 'Pause' : 'Play';
+}
+
 function frame() {
   requestAnimationFrame(frame);
   if (!S) return;
@@ -2346,20 +2673,36 @@ function frame() {
 
   if (!scrubbing) {
     const seek = $('#seek');
-    seek.max = Math.max(1, Math.floor(dur || 1));
-    seek.value = Math.floor(pos);
-    setFill(seek, dur ? (pos / dur) * 100 : 0);
+    const max = Math.max(1, Math.floor(dur || 1));
+    const value = Math.floor(pos);
+    if (max !== lastSeekMax) {
+      seek.max = max;
+      lastSeekMax = max;
+    }
+    if (value !== lastSeekVal) {
+      seek.value = value;
+      lastSeekVal = value;
+      setFill(seek, dur ? (pos / dur) * 100 : 0);
+    }
   }
 
-  $('#tCur').textContent = fmt(pos);
-  if (dur) $('#tDur').textContent = fmt(dur);
+  const curText = fmt(pos);
+  if (curText !== lastCurText) {
+    $('#tCur').textContent = curText;
+    lastCurText = curText;
+  }
+  if (dur) {
+    const durText = fmt(dur);
+    if (durText !== lastDurText) {
+      $('#tDur').textContent = durText;
+      lastDurText = durText;
+    }
+  }
 
   if (S.view === 'lyrics') updateLyricHighlight();
   syncVideo();
-  if (S.view === 'queue') {
-    const bar = $('.now-card .mini-bar i');
-    if (bar && dur) bar.style.width = `${(pos / dur) * 100}%`;
-  }
+  if (S.view === 'queue') paintQueueProgress(pos, dur);
+  maybePreload();
 }
 
 let authMode = 'login';
@@ -2828,6 +3171,89 @@ function fmtBytes(n) {
   return `${Math.round(bytes / (1024 * 1024))} MB`;
 }
 
+function setSwitch(id, checked) {
+  const button = $(id);
+  if (!button) return;
+  button.setAttribute('aria-checked', checked ? 'true' : 'false');
+}
+
+function applySettingsState(settings) {
+  if (!settings) return;
+  const discord = settings.discord || {};
+  settingsState = {
+    autoUpdateCheck: settings.autoUpdateCheck !== false,
+    ambientArtwork: settings.ambientArtwork !== false,
+    reduceMotion: settings.reduceMotion === true,
+    discord: {
+      enabled: discord.enabled === true,
+      status: discord.status || 'Disabled',
+    },
+  };
+
+  document.body.classList.toggle('ambient-off', !settingsState.ambientArtwork);
+  document.body.classList.toggle('reduce-motion', settingsState.reduceMotion);
+  setSwitch('#autoUpdateToggle', settingsState.autoUpdateCheck);
+  setSwitch('#ambientToggle', settingsState.ambientArtwork);
+  setSwitch('#reduceMotionToggle', settingsState.reduceMotion);
+  setSwitch('#discordEnabled', settingsState.discord.enabled);
+
+  const status = $('#discordStatus');
+  if (status) {
+    status.textContent = settingsState.discord.status;
+    status.classList.toggle('is-connected', /^(connected|paused)$/i.test(settingsState.discord.status));
+    status.classList.toggle(
+      'is-error',
+      /(could not|not available|enter your|add a discord)/i.test(settingsState.discord.status),
+    );
+  }
+
+}
+
+async function loadSettingsState() {
+  const settings = await invoke('settings_get').catch(() => null);
+  applySettingsState(settings);
+  return settings;
+}
+
+async function saveDiscordSettings(enabledOverride) {
+  const enabled = typeof enabledOverride === 'boolean'
+    ? enabledOverride
+    : settingsState.discord.enabled;
+  try {
+    const settings = await invoke('discord_rpc_set', { enabled });
+    applySettingsState(settings);
+    toast(enabled ? 'Discord Rich Presence on' : 'Discord Rich Presence off');
+    return true;
+  } catch (e) {
+    const message = String(e || 'Could not update that setting')
+      .replace(/^Error:\s*/i, '')
+      .trim();
+    toast(message || 'Could not update that setting');
+    setSwitch('#discordEnabled', settingsState.discord.enabled);
+    return false;
+  }
+}
+
+const SETTINGS_TABS = ['cache', 'discord', 'general', 'appearance'];
+
+function activateSettingsTab(tab, persist = true) {
+  const selected = SETTINGS_TABS.includes(tab) ? tab : 'cache';
+  settingsTab = selected;
+  if (persist) {
+    try { localStorage.setItem('esm.settingsTab', selected); } catch {}
+  }
+  document.querySelectorAll('[data-setting-tab]').forEach((button) => {
+    const active = button.dataset.settingTab === selected;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+    button.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll('[data-setting-panel]').forEach((panel) => {
+    panel.hidden = panel.dataset.settingPanel !== selected;
+    panel.classList.toggle('is-active', panel.dataset.settingPanel === selected);
+  });
+}
+
 async function refreshCacheStats() {
   try {
     const s = await invoke('cache_stats');
@@ -2837,22 +3263,31 @@ async function refreshCacheStats() {
     const usage = $('#cacheUsage');
     if (usage) usage.textContent = `${fmtBytes(used)} of ${fmtBytes(limit)} used · ${tracks} track${tracks === 1 ? '' : 's'} cached`;
     const bar = $('#cacheBar');
-    if (bar) bar.style.width = `${limit ? Math.min(100, (used / limit) * 100) : 0}%`;
+    if (bar) setScaleX(bar, limit ? Math.min(100, (used / limit) * 100) : 0);
     const gb = limit ? Math.round(limit / (1024 * 1024 * 1024)) : 5;
     document.querySelectorAll('#cacheLimit .seg-item').forEach((b) => {
       const on = Number(b.dataset.gb) === gb;
       b.classList.toggle('on', on);
       b.setAttribute('aria-checked', on ? 'true' : 'false');
     });
-  } catch {}
+  } catch (e) {
+    try { invoke('web_log', { message: `[cache] stats failed: ${e}` }); } catch {}
+    const usage = $('#cacheUsage');
+    if (usage) usage.textContent = 'Cache status unavailable';
+  }
 }
 
 function openSettings() {
   $('#userMenu').classList.remove('on');
   $('#userBtn').setAttribute('aria-expanded', 'false');
+  let saved = 'cache';
+  try { saved = localStorage.getItem('esm.settingsTab') || 'cache'; } catch {}
+  activateSettingsTab(saved, false);
   $('#setModal').hidden = false;
   refreshCacheStats();
   refreshVersion();
+  loadSettingsState();
+  setTimeout(() => $('[data-setting-tab].is-active')?.focus(), 30);
 }
 
 function closeSettings() {
@@ -2866,6 +3301,57 @@ $('#settingsBtn').addEventListener('click', (e) => {
 $('#setClose').addEventListener('click', closeSettings);
 $('#setBackdrop').addEventListener('click', closeSettings);
 
+document.querySelectorAll('[data-setting-tab]').forEach((button) => {
+  button.addEventListener('click', () => activateSettingsTab(button.dataset.settingTab));
+  button.addEventListener('keydown', (e) => {
+    const keys = ['ArrowUp', 'ArrowDown', 'Home', 'End'];
+    if (!keys.includes(e.key)) return;
+    e.preventDefault();
+    const tabs = [...document.querySelectorAll('[data-setting-tab]')];
+    const current = tabs.indexOf(e.currentTarget);
+    let next = current;
+    if (e.key === 'ArrowUp') next = (current - 1 + tabs.length) % tabs.length;
+    if (e.key === 'ArrowDown') next = (current + 1) % tabs.length;
+    if (e.key === 'Home') next = 0;
+    if (e.key === 'End') next = tabs.length - 1;
+    tabs[next].focus();
+    activateSettingsTab(tabs[next].dataset.settingTab);
+  });
+});
+
+$('#autoUpdateToggle')?.addEventListener('click', async () => {
+  const next = !settingsState.autoUpdateCheck;
+  try {
+    const settings = await invoke('general_set', { autoUpdateCheck: next });
+    applySettingsState(settings);
+    toast(next ? 'Automatic update checks on' : 'Automatic update checks off');
+  } catch {
+    toast('Could not update that setting');
+  }
+});
+
+$('#ambientToggle')?.addEventListener('click', async () => {
+  const settings = await invoke('appearance_set', {
+    ambientArtwork: !settingsState.ambientArtwork,
+    reduceMotion: settingsState.reduceMotion,
+  }).catch(() => null);
+  if (settings) applySettingsState(settings);
+  else toast('Could not update that setting');
+});
+
+$('#reduceMotionToggle')?.addEventListener('click', async () => {
+  const settings = await invoke('appearance_set', {
+    ambientArtwork: settingsState.ambientArtwork,
+    reduceMotion: !settingsState.reduceMotion,
+  }).catch(() => null);
+  if (settings) applySettingsState(settings);
+  else toast('Could not update that setting');
+});
+
+$('#discordEnabled')?.addEventListener('click', () => {
+  saveDiscordSettings(!settingsState.discord.enabled);
+});
+
 $('#cacheLimit').addEventListener('click', async (e) => {
   const b = e.target.closest('[data-gb]');
   if (!b) return;
@@ -2873,7 +3359,76 @@ $('#cacheLimit').addEventListener('click', async (e) => {
   refreshCacheStats();
 });
 
+
 const UPDATE_SKIP_KEY = 'esm.skipUpdate';
+let updateInstalling = false;
+
+function setUpdateProgress(downloaded, total) {
+  const bytes = Math.max(0, Number(downloaded) || 0);
+  const totalBytes = Math.max(0, Number(total) || 0);
+  const meter = $('#updMeter');
+  const hasTotal = totalBytes > 0;
+  const pct = hasTotal ? Math.min(100, Math.floor((bytes / totalBytes) * 100)) : 0;
+
+  $('#updProgressText').textContent = 'Downloading update…';
+  $('#updProgressPct').textContent = hasTotal ? `${pct}%` : '';
+  setScaleX($('#updProgressBar'), hasTotal ? pct : 0);
+  $('#updProgressDetail').textContent = hasTotal
+    ? `${fmtBytes(bytes)} of ${fmtBytes(totalBytes)}`
+    : `${fmtBytes(bytes)} downloaded`;
+
+  if (meter) {
+    meter.classList.toggle('is-indeterminate', !hasTotal);
+    meter.setAttribute('aria-valuenow', String(pct));
+  }
+}
+
+function showUpdateProgress() {
+  updateInstalling = true;
+  $('#updProgress').hidden = false;
+  $('#updNotes').hidden = true;
+  $('#updLater').hidden = true;
+  $('#updClose').disabled = true;
+  $('#updNow').disabled = true;
+  $('#updNow').textContent = 'Preparing…';
+  $('#updLead').textContent = 'Downloading the update. Esmeringhoy closes and reopens by itself once it is installed.';
+  $('#updProgressText').textContent = 'Preparing download…';
+  $('#updProgressPct').textContent = '';
+  setScaleX($('#updProgressBar'), 0);
+  $('#updProgressDetail').textContent = '';
+  const meter = $('#updMeter');
+  if (meter) {
+    meter.classList.add('is-indeterminate');
+    meter.setAttribute('aria-valuenow', '0');
+  }
+}
+
+function failUpdate(err) {
+  updateInstalling = false;
+  const message = String(err?.message || err || 'Update failed').replace(/^Error:\s*/i, '').trim();
+  $('#updProgress').hidden = false;
+  $('#updProgressText').textContent = 'Update failed';
+  $('#updProgressPct').textContent = '';
+  setScaleX($('#updProgressBar'), 0);
+  $('#updProgressDetail').textContent = message || 'The update could not be installed.';
+  const meter = $('#updMeter');
+  if (meter) {
+    meter.classList.remove('is-indeterminate');
+    meter.setAttribute('aria-valuenow', '0');
+  }
+  $('#updLater').hidden = false;
+  $('#updClose').disabled = false;
+  $('#updNow').disabled = false;
+  $('#updNow').textContent = 'Try again';
+  $('#updLead').textContent = 'A newer version is available. Your settings and cached tracks are kept.';
+  toast(message || 'Update failed');
+}
+
+listen('update:progress', (e) => {
+  if (!updateInstalling) return;
+  const payload = e?.payload || {};
+  setUpdateProgress(payload.downloaded, payload.total);
+});
 
 async function checkForUpdates(manual = false) {
   try {
@@ -2890,6 +3445,7 @@ async function checkForUpdates(manual = false) {
 }
 
 function showUpdate(info) {
+  updateInstalling = false;
   $('#updVersion').textContent = info.version || '';
   const notes = (info.notes || '').trim();
   const box = $('#updNotes');
@@ -2899,10 +3455,18 @@ function showUpdate(info) {
   now.dataset.url = info.url || '';
   now.dataset.install = info.canInstall ? '1' : '';
   now.textContent = info.canInstall ? 'Update & restart' : 'Open download page';
+  $('#updClose').disabled = false;
+  $('#updLater').hidden = false;
+  $('#updProgress').hidden = true;
+  $('#updLead').textContent = 'A newer version is available. Your settings and cached tracks are kept.';
   $('#updModal').hidden = false;
 }
 
 function closeUpdate() {
+  if (updateInstalling) {
+    toast('Update is in progress — please wait');
+    return;
+  }
   $('#updModal').hidden = true;
 }
 
@@ -2917,19 +3481,16 @@ $('#updNow').addEventListener('click', async () => {
   const url = btn.dataset.url;
   if (!url) return;
   if (btn.dataset.install) {
-    btn.disabled = true;
-    btn.textContent = 'Updating…';
-    $('#updLater').hidden = true;
-    $('#updNotes').hidden = true;
-    $('#updLead').textContent = 'Downloading the update. Esmeringhoy closes and reopens by itself once it is installed.';
+    showUpdateProgress();
     try {
       await invoke('install_update', { url });
-    } catch {
-      btn.disabled = false;
-      btn.textContent = 'Update & restart';
-      $('#updLater').hidden = false;
-      $('#updLead').textContent = 'A newer version is available. Your settings and cached tracks are kept.';
-      toast('Update failed');
+      $('#updProgressText').textContent = 'Update downloaded';
+      $('#updProgressPct').textContent = '100%';
+      setScaleX($('#updProgressBar'), 100);
+      $('#updProgressDetail').textContent = 'Starting the installer…';
+      $('#updNow').textContent = 'Installing…';
+    } catch (err) {
+      failUpdate(err);
     }
     return;
   }
@@ -2976,6 +3537,7 @@ async function boot() {
   try {
     API_BASE = await invoke('api_base').catch(() => '');
   } catch {}
+  const settings = await loadSettingsState().catch(() => null);
   try {
     await runGate();
 
@@ -3018,7 +3580,9 @@ async function boot() {
 
     connectStream();
     loadCatalog();
-    setTimeout(() => checkForUpdates(false), 5000);
+    if (settings?.autoUpdateCheck !== false) {
+      setTimeout(() => checkForUpdates(false), 5000);
+    }
   } catch {
     $('#view').innerHTML = `<div class="empty"><div class="big">Server not reachable</div><div>Check your connection — the app could not reach the Esmeringhoy server.</div></div>`;
   } finally {
@@ -3040,4 +3604,9 @@ async function readInitialState(attempts = 4) {
 
 setUser(null);
 requestAnimationFrame(frame);
+// Refresh the Discord progress bar a few times per minute while playing;
+// the engine dedupes by 5% bucket, so most ticks cost nothing.
+setInterval(() => {
+  if (engineIsPlayingCurrent()) invoke('discord_rpc_sync').catch(() => {});
+}, 5000);
 boot();
