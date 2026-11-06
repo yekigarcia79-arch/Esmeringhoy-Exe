@@ -53,7 +53,6 @@ Download the latest build from
 |---|---|---|
 | `Esmeringhoy_1.0.0_x64-setup.exe` (NSIS) | Current user, no admin | `%LOCALAPPDATA%\Esmeringhoy` |
 | `Esmeringhoy_1.0.0_x64_en-US.msi` | All users, requires admin | `Program Files\Esmeringhoy` |
-| `Esmeringhoy_1.0.0_portable.exe` | No installation | Runs from any folder |
 
 **Requirements:** Windows 10 or 11 (64-bit) and the WebView2 runtime
 (preinstalled on Windows 11; the installer downloads it if missing).
