@@ -2739,7 +2739,7 @@ function renderAuthFields() {
   $('#fieldCode').hidden = !sent;
   $('#resendCode').hidden = !sent;
   $('#hintCode').textContent = sent && codeEmail
-    ? `Sent to ${codeEmail}. It expires in 10 minutes.`
+    ? `Check ${codeEmail} — a sign-in code, or a link to create an account.`
     : 'It expires in 10 minutes.';
 
   $('#hintUser').hidden = !isRegister;
@@ -2789,6 +2789,17 @@ function setUser(user) {
 function showAuth(mode = 'login') {
   disconnectStream();
   authOpen = true;
+
+  // Arriving from the "no account on this address" email: the address is
+  // already known, so the form should not make them retype it.
+  if (mode === 'register') {
+    const invited = new URLSearchParams(location.search).get('email');
+    if (invited) {
+      const el = $('#authEmail');
+      if (el) el.value = invited;
+    }
+  }
+
   setAuthMode(mode);
   $('#authPass').type = 'password';
   $('#peekPass').setAttribute('aria-pressed', 'false');
@@ -2974,7 +2985,7 @@ async function resendCode() {
     await invoke('auth_email_start', { email: codeEmail });
 
     authError('');
-    $('#hintCode').textContent = `New code sent to ${codeEmail}. It expires in 10 minutes.`;
+    $('#hintCode').textContent = `Check ${codeEmail} — a sign-in code, or a link to create an account.`;
     $('#authCode').value = '';
     $('#authCode').focus();
     startResendCountdown(45);
