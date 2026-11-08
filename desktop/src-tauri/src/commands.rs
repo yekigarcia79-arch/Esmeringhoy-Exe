@@ -127,6 +127,18 @@ pub async fn auth_register(
         return Err(msg.to_string());
     }
 
+    // Registration no longer signs anyone in. The account is created pending
+    // and stays inert until the emailed link is opened, so there is no token
+    // to store — that is a success, not a missing field.
+    if r.json.get("pending").and_then(Value::as_bool).unwrap_or(false) {
+        return Ok(json!({
+            "pending": true,
+            "email": r.json.get("email").cloned().unwrap_or(Value::Null),
+            "message": r.json.get("message").cloned().unwrap_or(Value::Null),
+            "warning": r.json.get("warning").cloned().unwrap_or(Value::Null),
+        }));
+    }
+
     let token = r
         .json
         .get("token")
@@ -188,7 +200,10 @@ pub async fn auth_email_verify(
         .call(
             "POST",
             "/api/auth/email/verify",
-            Some(json!({ "email": email, "code": code })),
+            // `token: true` is what makes the server return a session token in
+            // the body. Without it the response is valid but tokenless, and the
+            // desktop has nothing to store.
+            Some(json!({ "email": email, "code": code, "token": true })),
         )
         .await
         .map_err(|e| e.to_string())?;

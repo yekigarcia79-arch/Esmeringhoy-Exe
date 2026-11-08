@@ -2722,6 +2722,13 @@ function authError(msg) {
   el.classList.toggle('bad', Boolean(msg));
 }
 
+// Same slot, without the red rule — for "this worked, but read the next step".
+function authNotice(msg) {
+  const el = $('#authError');
+  el.textContent = msg || '';
+  el.classList.remove('bad');
+}
+
 let codeSent = false;
 let codeEmail = '';
 
@@ -3135,6 +3142,21 @@ $('#authForm').addEventListener('submit', async (e) => {
         email: $('#authEmail').value.trim() || undefined,
         invite: $('#authInvite').value.trim() || undefined,
       });
+
+      // The account exists but is not signed in: it stays inert until the
+      // emailed activation link is opened. Showing this as a success, not a
+      // failure, is the whole point of the pending state.
+      if (r?.pending) {
+        setAuthMode('login');
+        authNotice(
+          r?.warning
+          || `Account created. Check ${r?.email || 'your inbox'} for the activation link.`,
+        );
+        $('#authPass').value = '';
+        $('#authPass2').value = '';
+        return;
+      }
+
       user = r?.user || null;
     }
     const sRes = await netFetch('/api/state');
