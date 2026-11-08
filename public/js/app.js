@@ -2735,7 +2735,9 @@ function renderAuthFields() {
   $('#authConfirmField').hidden = !isRegister;
   $('#fieldInvite').hidden = !isRegister || regMode !== 'invite';
 
-  $('#fieldEmail').hidden = !(isRegister || (isCode && !sent));
+  // A "copy code" link carries the code but not necessarily the address, so
+  // the email field stays available until we know which mailbox it belongs to.
+  $('#fieldEmail').hidden = !(isRegister || (isCode && (!sent || !codeEmail)));
   $('#fieldCode').hidden = !sent;
   $('#resendCode').hidden = !sent;
   $('#hintCode').textContent = sent && codeEmail
@@ -3041,11 +3043,24 @@ async function submitCode() {
     return authError('Enter the 6-digit code.');
   }
 
+  // Opened from a link that had a code but no address: ask for it rather than
+  // sending an empty string, which the server would rightly call malformed.
+  let email = codeEmail;
+  if (!email) {
+    email = $('#authEmail').value.trim();
+    if (!email) {
+      $('#authEmail').focus();
+      return authError('Enter your email address.');
+    }
+    codeEmail = email;
+    renderAuthFields();
+  }
+
   btn.disabled = true;
   btn.classList.add('is-loading');
   $('#authSubmit .btn-label').textContent = 'Signing in…';
   try {
-    const r = await invoke('auth_email_verify', { email: codeEmail, code });
+    const r = await invoke('auth_email_verify', { email, code });
     const user = r?.user || null;
     let snap = r?.state && r.state !== null && r.state !== undefined ? r.state : null;
     if (!snap) {
