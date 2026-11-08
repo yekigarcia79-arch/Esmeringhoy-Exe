@@ -1,6 +1,6 @@
 [package]
 name = "esmeringhoy"
-version = "1.0.0"
+version = "1.0.4"
 description = "Esmeringhoy — standalone desktop music player"
 authors = ["Esmeringhoy"]
 edition = "2021"
