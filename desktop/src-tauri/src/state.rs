@@ -24,6 +24,10 @@ fn default_logo() -> String {
     "logo".to_string()
 }
 
+fn default_discord_client_id() -> String {
+    "1568194603189010562".to_string()
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Prefs {
     pub volume: f32,
@@ -37,7 +41,7 @@ pub struct Prefs {
     pub reduce_motion: bool,
     #[serde(default)]
     pub discord_rpc_enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_discord_client_id")]
     pub discord_client_id: String,
     #[serde(default = "default_logo")]
     pub discord_large_image_key: String,
@@ -54,7 +58,7 @@ impl Default for Prefs {
             ambient_artwork: true,
             reduce_motion: false,
             discord_rpc_enabled: false,
-            discord_client_id: String::new(),
+            discord_client_id: default_discord_client_id(),
             discord_large_image_key: default_logo(),
             discord_small_image_key: default_logo(),
         }
@@ -77,7 +81,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(data_dir: &Path) -> Result<Self> {
+    pub fn new(data_dir: &Path, app: &tauri::AppHandle) -> Result<Self> {
         std::fs::create_dir_all(data_dir).context("creating data dir")?;
 
         let prefs_path = data_dir.join("settings.json");
@@ -93,7 +97,7 @@ impl AppState {
         let api = Arc::new(ApiClient::new(&base));
         let prefs_for_rpc = prefs.clone();
         let engine = Arc::new(Engine::new(prefs.volume).context("audio engine failed to start")?);
-        let discord = Arc::new(DiscordRpc::new(&prefs_for_rpc));
+        let discord = Arc::new(DiscordRpc::new(&prefs_for_rpc, app.clone()));
         let preloader = Preloader::new(Arc::clone(&api), Arc::clone(&cache));
 
         Ok(Self { api, cache, engine, discord, preloader, prefs: Mutex::new(prefs), prefs_path })

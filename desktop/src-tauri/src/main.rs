@@ -21,7 +21,7 @@ fn main() {
                 .path()
                 .app_local_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let app_state = AppState::new(&data_dir).expect("app state builds");
+            let app_state = AppState::new(&data_dir, app.handle()).expect("app state builds");
             app.manage(Arc::new(app_state));
             Ok(())
         })
@@ -30,6 +30,8 @@ fn main() {
             commands::artist_thumb,
             commands::auth_sign_in,
             commands::auth_register,
+            commands::auth_email_start,
+            commands::auth_email_verify,
             commands::auth_restore,
             commands::auth_sign_out,
             commands::engine_load,

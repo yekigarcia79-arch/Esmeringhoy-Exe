@@ -493,6 +493,15 @@ listen('cache:download', (e) => {
     });
   }
 });
+listen('discord:status', (e) => {
+  const d = e?.payload || {};
+  settingsState.discord = {
+    enabled: d.enabled === true,
+    status: d.status || 'Disabled',
+  };
+  setSwitch('#discordEnabled', settingsState.discord.enabled);
+  paintDiscordStatus();
+});
 
 async function refreshDownloadedBadges() {
   if (!plDetail?.tracks?.length) return;
@@ -2962,29 +2971,19 @@ async function resendCode() {
   btn.textContent = 'Sending…';
 
   try {
-    const res = await netFetch('/api/auth/email/start', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email: codeEmail }),
-    });
-    const data = await res.json().catch(() => ({}));
-
-    if (!res.ok) {
-      const wait = /Wait (\d+)s/.exec(data.error || '');
-      authError(data.error || 'Could not resend the code.');
-      if (wait) startResendCountdown(Number(wait[1]));
-      else renderResend();
-      return;
-    }
+    await invoke('auth_email_start', { email: codeEmail });
 
     authError('');
     $('#hintCode').textContent = `New code sent to ${codeEmail}. It expires in 10 minutes.`;
     $('#authCode').value = '';
     $('#authCode').focus();
     startResendCountdown(45);
-  } catch {
-    authError('Cannot reach the server.');
-    renderResend();
+  } catch (e) {
+    const msg = String(e || '').replace(/^.*Error:\s*/i, '');
+    const wait = /Wait (\d+)s/.exec(msg || '');
+    authError(msg || 'Could not resend the code.');
+    if (wait) startResendCountdown(Number(wait[1]));
+    else renderResend();
   }
 }
 
@@ -3009,24 +3008,16 @@ async function submitCode() {
     btn.classList.add('is-loading');
     $('#authSubmit .btn-label').textContent = 'Sending…';
     try {
-      const res = await netFetch('/api/auth/email/start', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        authError(data.error || 'Could not send the code.');
-        return;
-      }
+      await invoke('auth_email_start', { email });
       codeSent = true;
       codeEmail = email;
       authError('');
       renderAuthFields();
       startResendCountdown(45);
       $('#authCode').focus();
-    } catch {
-      authError('Cannot reach the server.');
+    } catch (e) {
+      const msg = String(e || '').replace(/^.*Error:\s*/i, '');
+      authError(msg || 'Could not send the code.');
     } finally {
       done();
     }
@@ -3043,28 +3034,25 @@ async function submitCode() {
   btn.classList.add('is-loading');
   $('#authSubmit .btn-label').textContent = 'Signing in…';
   try {
-    const res = await netFetch('/api/auth/email/verify', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email: codeEmail, code }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      authError(data.error || 'That code did not work.');
-      return;
+    const r = await invoke('auth_email_verify', { email: codeEmail, code });
+    const user = r?.user || null;
+    let snap = r?.state && r.state !== null && r.state !== undefined ? r.state : null;
+    if (!snap) {
+      const sRes = await netFetch('/api/state');
+      if (sRes.ok) snap = await sRes.json();
     }
-
-    setUser(data.user);
+    setUser(user);
     hideAuth();
     resetClientState();
-    apply(data.state);
+    if (snap) apply(snap);
     connectStream();
     loadCatalog();
-    if (data.created) toast('New account created for that address');
+    if (r?.created) toast('New account created for that address');
     $('#authCode').value = '';
     codeSent = false;
-  } catch {
-    authError('Cannot reach the server.');
+  } catch (e) {
+    const msg = String(e || '').replace(/^.*Error:\s*/i, '');
+    authError(msg || 'That code did not work.');
   } finally {
     done();
   }
@@ -3197,16 +3185,18 @@ function applySettingsState(settings) {
   setSwitch('#reduceMotionToggle', settingsState.reduceMotion);
   setSwitch('#discordEnabled', settingsState.discord.enabled);
 
-  const status = $('#discordStatus');
-  if (status) {
-    status.textContent = settingsState.discord.status;
-    status.classList.toggle('is-connected', /^(connected|paused)$/i.test(settingsState.discord.status));
-    status.classList.toggle(
-      'is-error',
-      /(could not|not available|enter your|add a discord)/i.test(settingsState.discord.status),
-    );
-  }
+  paintDiscordStatus();
+}
 
+function paintDiscordStatus() {
+  const status = $('#discordStatus');
+  if (!status) return;
+  status.textContent = settingsState.discord.status;
+  status.classList.toggle('is-connected', /^(connected|paused)$/i.test(settingsState.discord.status));
+  status.classList.toggle(
+    'is-error',
+    /(could not|not available|enter your|add a discord)/i.test(settingsState.discord.status),
+  );
 }
 
 async function loadSettingsState() {

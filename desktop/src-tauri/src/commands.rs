@@ -139,6 +139,85 @@ pub async fn auth_register(
 }
 
 #[tauri::command]
+pub async fn auth_email_start(
+    state: State<'_, Arc<AppState>>,
+    email: String,
+) -> Result<Value, String> {
+    let email = email.trim().to_string();
+    if email.is_empty() {
+        return Err("Enter your email address.".into());
+    }
+    let r = state
+        .api
+        .call(
+            "POST",
+            "/api/auth/email/start",
+            Some(json!({ "email": email })),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !r.ok() {
+        let msg = r
+            .json
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Could not send the code.");
+        return Err(msg.to_string());
+    }
+
+    Ok(json!({ "ok": true }))
+}
+
+#[tauri::command]
+pub async fn auth_email_verify(
+    state: State<'_, Arc<AppState>>,
+    email: String,
+    code: String,
+) -> Result<Value, String> {
+    let email = email.trim().to_string();
+    let code = code.trim().to_string();
+    if email.is_empty() {
+        return Err("Enter your email address.".into());
+    }
+    if code.len() != 6 {
+        return Err("Enter the 6-digit code.".into());
+    }
+    let r = state
+        .api
+        .call(
+            "POST",
+            "/api/auth/email/verify",
+            Some(json!({ "email": email, "code": code })),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !r.ok() {
+        let msg = r
+            .json
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("That code did not work.");
+        return Err(msg.to_string());
+    }
+
+    let token = r
+        .json
+        .get("token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "the server did not return a session token — update the backend".to_string())?;
+    keystore::save_token(token).map_err(|e| format!("could not store the session securely: {e}"))?;
+    state.api.set_token(Some(token.to_string()));
+
+    Ok(json!({
+        "user": r.json.get("user").cloned().unwrap_or(Value::Null),
+        "state": r.json.get("state").cloned().unwrap_or(Value::Null),
+        "created": r.json.get("created").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+#[tauri::command]
 pub async fn auth_restore(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let Some(token) = keystore::load_token() else {
         return Ok(json!({ "signedIn": false }));
