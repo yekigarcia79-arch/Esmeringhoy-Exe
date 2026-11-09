@@ -23,6 +23,29 @@ fn main() {
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             let app_state = AppState::new(&data_dir, app.handle()).expect("app state builds");
             app.manage(Arc::new(app_state));
+
+            // Alt-Tab and the taskbar read the window's own icon, not the
+            // executable's resources. Tauri normally copies it across from the
+            // .ico at creation, which left this window with the generic
+            // placeholder, so set it here from the bundled PNG as well — the
+            // window then has an icon whatever the resource lookup did.
+            if let Some(window) = app.get_webview_window("main") {
+                let icon = app
+                    .default_window_icon()
+                    .cloned()
+                    .or_else(|| {
+                        tauri::image::Image::from_bytes(include_bytes!("../icons/128x128@2x.png")).ok()
+                    });
+                match icon {
+                    Some(icon) => {
+                        if let Err(e) = window.set_icon(icon) {
+                            eprintln!("could not set the window icon: {e}");
+                        }
+                    }
+                    None => eprintln!("no window icon available"),
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

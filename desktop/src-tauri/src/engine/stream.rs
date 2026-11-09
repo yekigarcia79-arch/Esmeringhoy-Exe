@@ -242,3 +242,64 @@ where
             ring.finish();
         });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn tail_file_waits_for_bytes_then_reports_the_end() {
+        let dir = std::env::temp_dir().join(format!("esm-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("track.part");
+        std::fs::write(&path, b"abc").unwrap();
+
+        let tail = Tail::new();
+        tail.advance(3);
+        let mut reader = TailFile::open(&path, Arc::clone(&tail)).unwrap();
+
+        let mut head = [0u8; 3];
+        reader.read_exact(&mut head).unwrap();
+        assert_eq!(&head, b"abc");
+
+        // The reader is parked on an empty tail while more bytes land, which
+        // is the state it sits in for most of a streamed track.
+        let writer = {
+            let tail = Arc::clone(&tail);
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(60));
+                let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+                file.write_all(b"de").unwrap();
+                tail.advance(5);
+                tail.finish();
+            })
+        };
+
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, b"de");
+        writer.join().unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_starved_ring_yields_silence_and_a_finished_one_ends() {
+        let ring = Ring::new(
+            NonZeroU16::new(1).unwrap(),
+            NonZeroU32::new(8_000).unwrap(),
+        );
+        ring.push(0.5);
+
+        let mut source = RingSource::new(Arc::clone(&ring));
+        assert_eq!(source.next(), Some(0.5));
+        // Nothing decoded yet: the device keeps running on silence rather than
+        // ending the track in the middle of a network stall.
+        assert_eq!(source.next(), Some(0.0));
+
+        ring.finish();
+        assert_eq!(source.next(), None);
+    }
+}

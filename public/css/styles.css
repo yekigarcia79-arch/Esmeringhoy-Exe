@@ -1237,6 +1237,205 @@ button.lyr-line:active { transform: scale(0.995); }
 .offset button { color: var(--ink-3); padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; }
 .offset button:hover { color: var(--ink); border-color: var(--line-3); }
 
+/* ── Immersive lyrics ──────────────────────────────────────────────────────
+   The Lyrics view is a layer over the whole window: artwork and a seek bar on
+   the left, the words on the right, nothing else. It fades and lifts in
+   instead of swapping the view under the cursor, and the artwork behind it is
+   a static blur — not a backdrop-filter, which would be re-sampled on every
+   frame the lyrics scroll. */
+
+.lyr-focus {
+  position: absolute;
+  inset: 0;
+  z-index: 65;
+  background: var(--black);
+  opacity: 0;
+  transform: scale(0.994);
+  transition: opacity 240ms var(--ease), transform 340ms var(--ease);
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.lyr-focus.in { opacity: 1; transform: none; }
+
+.lyr-focus.in .lf-side { animation: lfRise 460ms var(--ease-out) 40ms both; }
+.lyr-focus.in .lf-main { animation: lfRise 460ms var(--ease-out) 110ms both; }
+
+@keyframes lfRise {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.lf-bg { position: absolute; inset: -12%; z-index: 0; pointer-events: none; overflow: hidden; }
+
+/* The room takes the artwork: the cover itself, blown up to fill the window
+   and only softened enough to hide the upscale. It stays a picture — a 70px
+   blur averaged it to grey, which is the black background with extra steps.
+   The scrim leans right, where the words are, and closes at the top and
+   bottom where the chrome and the offset row sit. */
+.lf-bg img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: blur(14px) saturate(1.2) brightness(0.92);
+  transform: scale(1.12);
+  opacity: 1;
+}
+
+.lf-bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(100deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0.52) 48%, rgba(0, 0, 0, 0.74) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.30) 0%, rgba(0, 0, 0, 0) 22%, rgba(0, 0, 0, 0) 68%, rgba(0, 0, 0, 0.42) 100%);
+}
+
+.lf-inner {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 336px) minmax(0, 1fr);
+  gap: 54px;
+  height: 100%;
+  min-height: 0;
+  padding: 46px 56px 30px;
+}
+
+.lf-close {
+  position: absolute;
+  top: 11px;
+  left: 14px;
+  z-index: 3;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--ink-3);
+  transition: color 160ms var(--ease), background-color 160ms var(--ease);
+}
+
+.lf-close:hover { color: var(--ink); background: rgba(255, 255, 255, 0.07); }
+
+.lf-side { display: flex; flex-direction: column; min-height: 0; }
+
+.lf-art {
+  flex: none;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--line-2);
+  box-shadow: 0 46px 90px -54px #000;
+}
+
+.lf-art img { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+.lf-meta { margin-top: 22px; min-width: 0; }
+
+.lf-meta h2 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 26px;
+  line-height: 1.15;
+  margin-top: 8px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.lf-by { color: var(--ink-3); font-size: 12.5px; margin-top: 8px; }
+.lf-by em { font-style: normal; color: var(--ink-4); margin: 0 4px; }
+
+.lf-seek { margin-top: 22px; }
+.lf-seek input { width: 100%; height: 30px; }
+
+/* The bar in the player is a hairline; here it is the control, so the track is
+   thick, the thumb is always visible, and both are sized to be hit. */
+.lf-seek input::-webkit-slider-runnable-track { height: 7px; border-radius: 4px; }
+.lf-seek input::-webkit-slider-thumb { width: 18px; height: 18px; margin-top: -5.5px; opacity: 1; }
+
+.lf-times {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 9px;
+  font: 400 11.5px/1 var(--font-mono);
+  color: var(--ink-3);
+}
+
+.lf-transport {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 20px;
+}
+
+.lf-transport .icon-btn { width: 38px; height: 38px; }
+.lf-transport .ic-lf { width: 21px; height: 21px; }
+
+.lf-transport #lfRepeat { position: relative; }
+.lf-transport .one {
+  position: absolute;
+  font: 600 8px/1 var(--font-mono);
+  font-style: normal;
+  bottom: 4px;
+  right: 5px;
+  display: none;
+}
+.lf-transport #lfRepeat.is-one .one { display: block; }
+
+.lf-play {
+  flex: none;
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--black);
+  transition: transform 160ms var(--ease);
+}
+
+.lf-play .ic-lf { width: 22px; height: 22px; }
+
+.lf-play:active { transform: scale(0.94); }
+.lf-play .pause-ic { display: none; }
+.lf-play.is-playing .play-ic { display: none; }
+.lf-play.is-playing .pause-ic { display: block; }
+
+.lyr-focus.is-idle .lf-seek,
+.lyr-focus.is-idle .lf-transport,
+.lyr-focus.is-idle .lf-art { display: none; }
+
+.lf-main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+
+.lf-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 6px 6px 0 0;
+  scrollbar-width: none;
+}
+
+.lf-scroll::-webkit-scrollbar { display: none; }
+
+.lf-scroll .lyrics-body { min-height: 0; }
+.lf-scroll .lyr-line { font-size: 23px; line-height: 1.55; }
+.lf-scroll .lyr-line.plain { font-size: 16px; line-height: 1.8; }
+
+.lf-main .lyr-tools { margin-top: 10px; padding-top: 12px; }
+
+@media (max-width: 900px) {
+  .lf-inner { grid-template-columns: minmax(0, 1fr); gap: 22px; padding: 44px 28px 24px; }
+  .lf-art { width: 150px; }
+  .lf-scroll .lyr-line { font-size: 19px; }
+}
+
 .np-view { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 44px; align-items: start; }
 
 .np-big {
@@ -1571,7 +1770,11 @@ input[type="range"]:hover::-moz-range-thumb { opacity: 1; }
   z-index: 95;
   background: var(--black);
   display: flex;
-  overflow-y: auto;
+  /* The bloom below is inset -25%, so it was the only thing making this
+     overlay scrollable: two bars for a screen whose content already fits.
+     Clip instead — there is nothing to scroll, and the gradient looks the
+     same because the part outside the window was never visible anyway. */
+  overflow: clip;
   isolation: isolate;
 }
 

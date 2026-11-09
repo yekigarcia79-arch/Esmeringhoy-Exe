@@ -15,7 +15,6 @@ use tauri::{AppHandle, Emitter};
 use crate::engine::stream::{spawn_decoder, Ring, RingSource, Tail, TailFile, PREBUFFER_BYTES};
 
 pub const TICK_MS: u64 = 400;
-const STREAM_WHILE_DOWNLOADING: bool = false;
 const SEEK_END_GUARD_SECS: f64 = 0.5;
 const USER_SEEK_SUPPRESS_MS: u64 = 100;
 pub const POSITION_EVENT: &str = "player:position";
@@ -226,21 +225,27 @@ impl Engine {
 
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *self.suppress_auto_advance_until.lock().unwrap() = None;
+        // Playback starts from the download itself. The bytes land in the
+        // cache file and the decoder reads that file as it grows, so the first
+        // sound comes once the header is there rather than once the whole
+        // track is. There is no second stage to switch to when the download
+        // finishes: the file being played is the cache being written, and the
+        // same handle keeps reading it after the .part is renamed.
         let dur = match cache.lookup(&track.video_id, "m4a") {
             Some(path) => match self.open_player(app, api, cache, &track, &path, gen) {
                 Ok(d) => d,
                 Err(_) => {
                     cache.remove(&track.video_id, "m4a");
-                    self.fetch_then_play(app, api, cache, &track, gen, "m4a").await?
+                    self.stream_track(app, api, cache, &track, gen, "m4a").await?
                 }
             },
-            None => {
-                if STREAM_WHILE_DOWNLOADING {
-                    self.stream_track(app, api, cache, &track, gen, "m4a").await?
-                } else {
-                    self.fetch_then_play(app, api, cache, &track, gen, "m4a").await?
-                }
-            }
+            None => match self.stream_track(app, api, cache, &track, gen, "m4a").await {
+                Ok(d) => d,
+                // Streaming could not start at all — a server that ignores
+                // Range, a header the decoder will not take mid-file. Fetching
+                // the whole file first is slower, but it still plays.
+                Err(_) => self.fetch_then_play(app, api, cache, &track, gen, "m4a").await?,
+            },
         };
         *self.current.lock().unwrap() = Some(track.clone());
         *self.duration_hint.lock().unwrap() = dur;
@@ -259,7 +264,9 @@ impl Engine {
     ) -> Result<Duration> {
         let dest = cache.path_for(&track.video_id, ext);
         let tail = Tail::new();
-        let bytes = self.download_streaming(app, api, track, &dest, tail).await?;
+        let bytes = self
+            .download_streaming(app, api, track, &dest, tail, Arc::new(AtomicBool::new(false)))
+            .await?;
         validate_audio_file(&dest, ext)?;
         cache.record(&track.video_id, ext, bytes);
         self.open_player(app, api, cache, track, &dest, gen)
@@ -282,6 +289,10 @@ impl Engine {
 
         let tail = Tail::new();
         let cancel = Arc::new(AtomicBool::new(false));
+        // Once the first samples are out, the download is a cache fill and
+        // nothing else: its progress stops being reported, so the status line
+        // reads "playing", not "buffering 41%" all the way through the track.
+        let audible = Arc::new(AtomicBool::new(false));
         *self.cancel.lock().unwrap() = Some(Arc::clone(&cancel));
         *self.tail.lock().unwrap() = Some(Arc::clone(&tail));
         self.streaming.store(true, Ordering::SeqCst);
@@ -294,8 +305,12 @@ impl Engine {
             let track = track.clone();
             let dest = dest.clone();
             let tail = Arc::clone(&tail);
+            let audible = Arc::clone(&audible);
             tauri::async_runtime::spawn(async move {
-                match engine.download_streaming(&app, &api, &track, &dest, Arc::clone(&tail)).await {
+                match engine
+                    .download_streaming(&app, &api, &track, &dest, Arc::clone(&tail), audible)
+                    .await
+                {
                     Ok(bytes) => {
                         cache.record(&track.video_id, &ext_for_dl, bytes);
                         tail.finish();
@@ -355,6 +370,7 @@ impl Engine {
         player.append(RingSource::new(ring));
         player.play();
         *self.player.lock().unwrap() = Some(player);
+        audible.store(true, Ordering::SeqCst);
 
         let duration = Duration::from_secs_f64(track.duration.max(0.0));
         self.spawn_ticker(app, api, cache, track, gen);
@@ -368,6 +384,7 @@ impl Engine {
         track: &PlayingTrack,
         dest: &Path,
         tail: Arc<Tail>,
+        audible: Arc<AtomicBool>,
     ) -> Result<u64> {
         let video_id = track.video_id.as_str();
 
@@ -379,13 +396,15 @@ impl Engine {
                     follow.advance(written);
                     if written.saturating_sub(last_emit) >= 256 * 1024 {
                         last_emit = written;
-                        let _ = app.emit(
-                            LOADING_EVENT,
-                            json!({
-                                "videoId": video_id,
-                                "progress": total.map(|t| written as f64 / t as f64).unwrap_or(-1.0),
-                            }),
-                        );
+                        if !audible.load(Ordering::Relaxed) {
+                            let _ = app.emit(
+                                LOADING_EVENT,
+                                json!({
+                                    "videoId": video_id,
+                                    "progress": total.map(|t| written as f64 / t as f64).unwrap_or(-1.0),
+                                }),
+                            );
+                        }
                     }
                 }, None)
                 .await?;
@@ -402,13 +421,15 @@ impl Engine {
                     follow.advance(written);
                     if written.saturating_sub(last_emit) >= 256 * 1024 {
                         last_emit = written;
-                        let _ = app.emit(
-                            LOADING_EVENT,
-                            json!({
-                                "videoId": video_id,
-                                "progress": total.map(|t| written as f64 / t as f64).unwrap_or(-1.0),
-                            }),
-                        );
+                        if !audible.load(Ordering::Relaxed) {
+                            let _ = app.emit(
+                                LOADING_EVENT,
+                                json!({
+                                    "videoId": video_id,
+                                    "progress": total.map(|t| written as f64 / t as f64).unwrap_or(-1.0),
+                                }),
+                            );
+                        }
                     }
                 },
                 None,

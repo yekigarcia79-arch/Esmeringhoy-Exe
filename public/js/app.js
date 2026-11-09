@@ -60,6 +60,20 @@ let artistDetail = null;
 let lastRev = -1;
 let lastViewSig = '';
 
+// Lyrics survive a source switch. Cycling drops the cached answer server-side,
+// so the snapshot that answers the click arrives with nothing in it; holding
+// the previous source here means the pane never blanks for a spinner.
+let lyricsHold = { videoId: '', data: null };
+let lyricsSwitching = false;
+
+// The Lyrics view is a layer of its own, so it needs its own open state, the
+// view to return to, and a scrubbing flag for its seek bar.
+let lyrFocusOpen = false;
+let lyrReturnView = 'home';
+let lfScrubbing = false;
+let lyrAutoTry = { videoId: '', count: 0 };
+let lyrAutoPending = false;
+
 let regMode = 'open';
 
 let CAT = { country: [], global: [], trending: [], countryName: 'Worldwide', ready: false };
@@ -115,6 +129,8 @@ function go(view) {
     showAuth('login');
     return;
   }
+  // Lyrics open as a layer, so remember what was underneath to go back to.
+  if (view === 'lyrics' && S?.view && S.view !== 'lyrics') lyrReturnView = S.view;
   setPath(pathForView(view));
   if (!S || S.view !== view) send('setView', { view });
 }
@@ -868,6 +884,19 @@ function apply(snap) {
     lastRev = snap.rev;
   }
 
+  // A snapshot with `loaded: false` is the server saying "the chain is still
+  // running". Keep the source that is already on screen for this track rather
+  // than replacing it with an empty object — the new one swaps in when it
+  // lands, which after the per-source cache is usually this same response.
+  const snapVid = snap.current?.videoId || '';
+  if (snap.lyrics?.loaded) {
+    const hasText = !!(snap.lyrics.lines?.length || snap.lyrics.plain);
+    lyricsHold = hasText ? { videoId: snapVid, data: snap.lyrics } : { videoId: '', data: null };
+  } else if (snap.lyricsPending && snapVid && snapVid === lyricsHold.videoId) {
+    snap.lyrics = lyricsHold.data;
+  }
+  lyricsSwitching = false;
+
   S = snap;
 
   if (videoMode && S.current && !S.current.video) {
@@ -904,6 +933,8 @@ function apply(snap) {
     const p = pathForView(S.view);
     if (location.pathname + location.search !== p) setPath(p, { replace: true });
   }
+
+  maybeAutoAdvanceLyrics();
 }
 
 function renderChrome() {
@@ -1015,7 +1046,7 @@ function viewSignature() {
     case 'mix': return `mix:${S.mix?.length}:${S.mixLoading}:${S.selectedArtists.join(',')}`;
     case 'playlists': return `pl:${plDetail?.id || ''}:${plDetail?.tracks?.length ?? -1}:${S.playlists.length}`;
     case 'queue': return `q:${S.queueCount}:${S.current?.videoId || ''}`;
-    case 'lyrics': return `ly:${S.current?.videoId || ''}:${S.lyrics?.source || ''}:${S.lyrics?.lines?.length || 0}:${videoMode ? 1 : 0}`;
+    case 'lyrics': return `ly:${S.current?.videoId || ''}:${S.lyrics?.source || ''}:${S.lyrics?.lines?.length || 0}:${videoMode ? 1 : 0}:${S.lyricsPending || lyricsSwitching ? 1 : 0}`;
     case 'now': return `now:${S.current?.videoId || ''}:${videoMode ? 1 : 0}`;
     default: return `home:${S.picks.length}:${S.jump.length}:${CAT.trending.length}:${S.mixCount}`;
   }
@@ -1032,15 +1063,22 @@ function renderView() {
   const view = $('#view');
   const scroll = $('#content').scrollTop;
 
-  switch (S.view) {
-    case 'search': view.innerHTML = renderSearchView(); break;
-    case 'artist': view.innerHTML = renderArtistView(); break;
-    case 'mix': view.innerHTML = renderMixView(); break;
-    case 'playlists': view.innerHTML = renderPlaylistsView(); break;
-    case 'queue': view.innerHTML = renderQueueView(); break;
-    case 'lyrics': view.innerHTML = renderLyricsView(); break;
-    case 'now': view.innerHTML = renderNowView(); break;
-    default: view.innerHTML = renderHomeView(); break;
+  if (S.view === 'lyrics') {
+    view.innerHTML = '';
+    viewList = [];
+    viewCtx = {};
+    openLyricsFocus();
+  } else {
+    closeLyricsFocus();
+    switch (S.view) {
+      case 'search': view.innerHTML = renderSearchView(); break;
+      case 'artist': view.innerHTML = renderArtistView(); break;
+      case 'mix': view.innerHTML = renderMixView(); break;
+      case 'playlists': view.innerHTML = renderPlaylistsView(); break;
+      case 'queue': view.innerHTML = renderQueueView(); break;
+      case 'now': view.innerHTML = renderNowView(); break;
+      default: view.innerHTML = renderHomeView(); break;
+    }
   }
 
   $('#content').scrollTop = scroll;
@@ -1656,64 +1694,209 @@ function renderQueueView() {
     </div>`;
 }
 
-function renderLyricsView() {
-  const lyr = S.lyrics || {};
-  const cur = S.current;
-  viewList = [];
-  viewCtx = {};
-
-  if (!cur) {
-    return `<div class="lyrics-wrap single"><div class="lyrics-head"><div><p class="eyebrow">Lyrics</p><h2>Nothing playing</h2></div></div>
-      <div class="lyr-empty">Play something and the lyrics arrive on their own.</div></div>`;
+function lyricsBodyHtml(lyr, busy, hasText) {
+  if (busy && !hasText) return `<div class="lyr-empty">Looking for lyrics…</div>`;
+  if (lyr.synced && lyr.lines?.length) {
+    return lyr.lines.map((l, i) => `<button class="lyr-line" tabindex="-1" title="Jump to this line" data-t="${l.t}" data-i="${i}">${esc(l.text)}</button>`).join('');
   }
-
-  if (videoMode) {
-    return `<div class="lyrics-wrap single">
-      <div class="lyrics-head"><div><p class="eyebrow">Lyrics</p><h2>${esc(cur.title)}</h2></div></div>
-      <div class="lyr-empty">Lyrics are off while the video is on. Switch back to Audio to read them.</div>
-    </div>`;
+  if (lyr.plain) {
+    return lyr.plain.split('\n').filter((x) => x.trim()).map((x) => `<div class="lyr-line plain">${esc(x)}</div>`).join('');
   }
+  if (lyr.instrumental) return `<div class="lyr-empty">Instrumental — no lyrics to show.</div>`;
+  if (lyr.notFound) return `<div class="lyr-empty">No lyrics found for this track.</div>`;
+  return `<div class="lyr-empty">Looking for lyrics…</div>`;
+}
 
-  let body = '';
-  if (S.lyricsPending) {
-    body = `<div class="lyr-empty">Looking for lyrics…</div>`;
-  } else if (lyr.synced && lyr.lines?.length) {
-    body = lyr.lines.map((l, i) => `<button class="lyr-line" tabindex="-1" title="Jump to this line" data-t="${l.t}" data-i="${i}">${esc(l.text)}</button>`).join('');
-  } else if (lyr.plain) {
-    body = lyr.plain.split('\n').filter((x) => x.trim()).map((x) => `<div class="lyr-line plain">${esc(x)}</div>`).join('');
-  } else if (lyr.instrumental) {
-    body = `<div class="lyr-empty">Instrumental — no lyrics to show.</div>`;
-  } else if (lyr.notFound) {
-    body = `<div class="lyr-empty">No lyrics found for this track.</div>`;
-  } else {
-    body = `<div class="lyr-empty">Looking for lyrics…</div>`;
-  }
-
+function lyricsToolsHtml(lyr) {
   return `
-    <div class="lyrics-wrap">
-      <aside class="lyr-side">
-        <div class="lyr-art">${art(cur.thumb, cur.title, '', 640)}</div>
-        <p class="eyebrow">${esc(lyr.sourceName || 'Lyrics')}</p>
-        <h2>${esc(cur.title)}</h2>
-        <p class="lyr-by">${esc(cur.artist || '')}${cur.album ? ` <em>·</em> ${esc(cur.album)}` : ''}</p>
-        <div class="lyr-actions">
-          <button class="btn ghost" data-act="lyrcycle">Try another source</button>
-          <button class="btn ghost" data-act="lyrSources">Sources</button>
-        </div>
-      </aside>
-      <section class="lyr-main">
-        <div class="lyrics-body" id="lyrBody">${body}</div>
-        <div class="lyr-tools">
-          <span class="offset">
-            Offset
-            <button data-act="lyrminus" aria-label="Lyrics earlier">−0.5</button>
-            <span id="lyrOffset">${(S.lyOffset || 0).toFixed(1)}s</span>
-            <button data-act="lyrplus" aria-label="Lyrics later">+0.5</button>
-          </span>
-          <span style="margin-left:auto">${lyr.synced ? 'Synced' : lyr.plain ? 'Plain text' : '—'}</span>
-        </div>
-      </section>
-    </div>`;
+    <span class="offset">
+      Offset
+      <button data-act="lyrminus" aria-label="Lyrics earlier">−0.5</button>
+      <span id="lyrOffset">${(S.lyOffset || 0).toFixed(1)}s</span>
+      <button data-act="lyrplus" aria-label="Lyrics later">+0.5</button>
+    </span>
+    <span style="margin-left:auto">${lyr.synced ? 'Synced' : lyr.plain ? 'Plain text' : '—'}</span>`;
+}
+
+// The Lyrics view is its own layer over the window, not a page inside it:
+// artwork, title and a seek bar on the left, the words on the right.
+function renderLyricsFocus() {
+  const el = $('#lyrFocus');
+  if (!el) return;
+
+  const cur = S.current;
+  const lyr = S.lyrics || {};
+  const hasText = !!(lyr.synced && lyr.lines?.length) || !!lyr.plain;
+  const busy = !!S.lyricsPending || lyricsSwitching;
+  const scroller = $('#lfScroll');
+  const keep = scroller ? scroller.scrollTop : 0;
+
+  el.classList.toggle('is-idle', !cur);
+
+  $('#lfArt').innerHTML = cur ? art(cur.thumb, cur.title, '', 640) : '';
+
+  const bg = cur?.thumb ? thumbAt(cur.thumb, 640) : '';
+  const bgEl = $('#lfBg');
+  if (bg) {
+    if (bgEl.getAttribute('src') !== bg) bgEl.src = bg;
+  } else {
+    bgEl.removeAttribute('src');
+  }
+
+  $('#lfSource').textContent = `${lyr.sourceName || 'Lyrics'}${busy && hasText ? ' · switching…' : ''}`;
+  $('#lfTitle').textContent = cur ? cur.title : 'Nothing playing';
+  $('#lfBy').textContent = cur
+    ? [cur.artist, cur.album].filter(Boolean).join(' · ')
+    : 'Play something and the lyrics arrive on their own.';
+
+  $('#lfBody').innerHTML = !cur
+    ? ''
+    : videoMode
+      ? `<div class="lyr-empty">Lyrics are off while the video is on. Switch back to Audio to read them.</div>`
+      : lyricsBodyHtml(lyr, busy, hasText);
+
+  $('#lfTools').innerHTML = cur && !videoMode ? lyricsToolsHtml(lyr) : '';
+
+  if (scroller) scroller.scrollTop = keep;
+  paintLyricsFocus();
+}
+
+function paintLyricsFocus() {
+  if (!lyrFocusOpen || !S) return;
+
+  const dur = audio.duration && isFinite(audio.duration) ? audio.duration : (S.current?.durationSec || 0);
+  const pos = audio.currentTime || 0;
+  const seek = $('#lfSeek');
+
+  if (seek) {
+    const max = Math.max(1, Math.floor(dur || 1));
+    if (Number(seek.max) !== max) {
+      // A new track resets the bar even while the position is still 0: without
+      // this the fill keeps the previous track's width until the first second.
+      seek.max = max;
+      setFill(seek, dur ? (pos / dur) * 100 : 0);
+    }
+    if (!lfScrubbing) {
+      const value = Math.floor(pos);
+      if (Number(seek.value) !== value) {
+        seek.value = value;
+        setFill(seek, dur ? (pos / dur) * 100 : 0);
+      }
+    }
+  }
+
+  const curEl = $('#lfCur');
+  const curText = fmt(pos);
+  if (curEl && curEl.textContent !== curText) curEl.textContent = curText;
+
+  const durEl = $('#lfDur');
+  const durText = dur ? fmt(dur) : '--:--';
+  if (durEl && durEl.textContent !== durText) durEl.textContent = durText;
+
+  const play = $('#lfPlay');
+  if (play) {
+    const on = S.transport === 'playing';
+    if (play.classList.contains('is-playing') !== on) {
+      play.classList.toggle('is-playing', on);
+      play.title = on ? 'Pause' : 'Play';
+      play.setAttribute('aria-label', play.title);
+    }
+  }
+
+  // The player bar is covered while this is open, so its state has to be
+  // mirrored here or the buttons would lie about shuffle and repeat.
+  const shuffle = $('#lfShuffle');
+  if (shuffle) {
+    const on = !!S.shuffle;
+    if (shuffle.classList.contains('on') !== on) {
+      shuffle.classList.toggle('on', on);
+      shuffle.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+  }
+
+  const repeat = $('#lfRepeat');
+  if (repeat) {
+    const on = S.repeat !== 0;
+    const one = S.repeat === 2;
+    if (repeat.classList.contains('on') !== on) {
+      repeat.classList.toggle('on', on);
+      repeat.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+    if (repeat.classList.contains('is-one') !== one) repeat.classList.toggle('is-one', one);
+    const title = ['Repeat off', 'Repeat all', 'Repeat one'][S.repeat] || 'Repeat off';
+    if (repeat.title !== title) {
+      repeat.title = title;
+      repeat.setAttribute('aria-label', title);
+    }
+  }
+
+  const next = $('#lfNext');
+  if (next) {
+    const off = !(S.queueCount > 0 || S.playlistActive);
+    if (next.disabled !== off) next.disabled = off;
+  }
+}
+
+function openLyricsFocus() {
+  const el = $('#lyrFocus');
+  if (!el) return;
+  renderLyricsFocus();
+  if (lyrFocusOpen) return;
+
+  lyrFocusOpen = true;
+  el.hidden = false;
+  // Read layout between "displayed" and "opened" so the transition has a
+  // state to come from. Setting both in one tick is what makes it snap.
+  void el.offsetWidth;
+  requestAnimationFrame(() => el.classList.add('in'));
+}
+
+function closeLyricsFocus() {
+  const el = $('#lyrFocus');
+  if (!el || !lyrFocusOpen) return;
+
+  lyrFocusOpen = false;
+  el.classList.remove('in');
+  setTimeout(() => {
+    if (!lyrFocusOpen) el.hidden = true;
+  }, 360);
+}
+
+function leaveLyricsFocus() {
+  const back = lyrReturnView && lyrReturnView !== 'lyrics' ? lyrReturnView : 'now';
+  go(back);
+}
+
+// "Try another source" without the click: a track whose chain came back empty
+// gets a couple of retries on its own. Each one only re-asks the providers
+// that never answered — the ones that did are on file — so this is cheap, and
+// it is capped so a track with no lyrics anywhere settles instead of looping.
+function maybeAutoAdvanceLyrics() {
+  if (!S || !lyrFocusOpen || S.view !== 'lyrics' || videoMode) return;
+
+  const cur = S.current;
+  if (!cur?.videoId) return;
+  if (lyrAutoTry.videoId !== cur.videoId) lyrAutoTry = { videoId: cur.videoId, count: 0 };
+
+  const lyr = S.lyrics || {};
+  if (lyr.lines?.length || lyr.plain || lyr.instrumental) {
+    lyrAutoTry.count = 0;
+    return;
+  }
+  if (!lyr.notFound || S.lyricsPending || lyricsSwitching) return;
+  if (lyrAutoPending || lyrAutoTry.count >= 2) return;
+
+  lyrAutoTry.count += 1;
+  lyrAutoPending = true;
+  setTimeout(() => {
+    lyrAutoPending = false;
+    if (!S || !lyrFocusOpen || S.view !== 'lyrics' || lyricsSwitching) return;
+    if (S.current?.videoId !== cur.videoId) return;
+    lyricsSwitching = true;
+    lastViewSig = '';
+    renderView();
+    send('lyricsCycle', { from: S?.lyrics?.source || '' });
+  }, 800);
 }
 
 function renderNowView() {
@@ -1884,11 +2067,13 @@ function updateLyricHighlight(force = false) {
 
     const active = nodes[idx];
     if (active && Date.now() - userScrolledAt > 4000) {
-      const box = $('#content');
-      const r = active.getBoundingClientRect();
-      const br = box.getBoundingClientRect();
-      const delta = r.top - br.top - box.clientHeight / 2 + r.height / 2;
-      glideTo(box, box.scrollTop + delta);
+      const box = lyrFocusOpen ? $('#lfScroll') : $('#content');
+      if (box) {
+        const r = active.getBoundingClientRect();
+        const br = box.getBoundingClientRect();
+        const delta = r.top - br.top - box.clientHeight / 2 + r.height / 2;
+        glideTo(box, box.scrollTop + delta);
+      }
     }
   }
 
@@ -2320,7 +2505,7 @@ document.addEventListener('keydown', (e) => {
   setFullscreen(false);
 });
 
-for (const el of document.querySelectorAll('.topbar, .auth, .gate')) {
+for (const el of document.querySelectorAll('.topbar, .auth, .gate, .lyr-focus')) {
   el.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     if (e.target.closest('button, a, input, select, textarea, label, .search, .user, .sug')) return;
@@ -2377,7 +2562,37 @@ $('#seek').addEventListener('change', () => {
   scrubbing = false;
 });
 
-$('#view').addEventListener('click', (e) => {
+$('#lfSeek').addEventListener('input', (e) => {
+  lfScrubbing = true;
+  const dur = audio.duration || 0;
+  if (!dur) return;
+  const safeEnd = Math.max(0, dur - SEEK_END_GUARD_SECS);
+  const want = Math.min(safeEnd, Math.max(0, Number(e.target.value) || 0));
+  audio.currentTime = want;
+  setFill(e.target, (want / dur) * 100);
+  const curEl = $('#lfCur');
+  if (curEl) curEl.textContent = fmt(want);
+});
+
+$('#lfSeek').addEventListener('change', () => {
+  flushPendingSeek();
+  lfScrubbing = false;
+});
+
+$('#lfPlay').addEventListener('click', () => send('togglePlay'));
+$('#lfShuffle').addEventListener('click', () => send('shuffle'));
+$('#lfRepeat').addEventListener('click', () => send('repeat'));
+$('#lfNext').addEventListener('click', () =>
+  send('next', { pos: audio.currentTime || 0, dur: audio.duration || 0 }));
+$('#lfPrev').addEventListener('click', () => {
+  if (audio.currentTime > 3) audio.currentTime = 0;
+  else send('prev');
+});
+$('#lfClose').addEventListener('click', leaveLyricsFocus);
+
+// The lyrics overlay lives outside #view, so both containers get the same two
+// listeners: one for jumping to a line, one for the data-act buttons.
+function onLyricLineClick(e) {
   const line = e.target.closest('.lyr-line[data-t]');
   if (!line) return;
   const t = Number(line.dataset.t);
@@ -2393,7 +2608,7 @@ $('#view').addEventListener('click', (e) => {
       if (S && S.transport === 'playing') send('transport', { state: 'paused' }, { silent: true });
     });
   }
-});
+}
 
 $('#openMix').addEventListener('click', () => go('mix'));
 $('#changeArtists').addEventListener('click', () => send('changeArtists'));
@@ -2444,7 +2659,7 @@ $('#plName').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); $('#plCreate').click(); }
 });
 
-$('#view').addEventListener('click', async (e) => {
+async function onViewAction(e) {
   const node = e.target.closest('[data-act]');
   if (!node) return;
   const act = node.dataset.act;
@@ -2602,6 +2817,12 @@ $('#view').addEventListener('click', async (e) => {
       send('lyricsOffset', { sec: (S.lyOffset || 0) - 0.5 });
       break;
     case 'lyrcycle':
+      // Say "switching" before the round trip, not after it: the request can
+      // take a moment on a cold provider, and a button that does nothing for
+      // a second reads as broken.
+      lyricsSwitching = true;
+      lastViewSig = '';
+      renderView();
       send('lyricsCycle', { from: S?.lyrics?.source || '' });
       break;
     case 'lyrSources':
@@ -2610,7 +2831,12 @@ $('#view').addEventListener('click', async (e) => {
     default:
       break;
   }
-});
+}
+
+$('#view').addEventListener('click', onLyricLineClick);
+$('#view').addEventListener('click', onViewAction);
+$('#lyrFocus').addEventListener('click', onLyricLineClick);
+$('#lyrFocus').addEventListener('click', onViewAction);
 
 $('#view').addEventListener('submit', (e) => {
   if (e.target.id !== 'plNewForm') return;
@@ -2648,6 +2874,7 @@ document.addEventListener('keydown', (e) => {
     else if (!$('#srcModal').hidden) closeSourceModal();
     else if (!$('#plModal').hidden) closePlaylistModal();
     else if (!$('#sug').hidden) hideSuggestions();
+    else if (lyrFocusOpen) leaveLyricsFocus();
     else if (document.activeElement === $('#q')) $('#q').blur();
   }
   if (e.code === 'Space' && !typing && $('#plModal').hidden) {
@@ -2709,6 +2936,7 @@ function frame() {
   }
 
   if (S.view === 'lyrics') updateLyricHighlight();
+  if (lyrFocusOpen) paintLyricsFocus();
   syncVideo();
   if (S.view === 'queue') paintQueueProgress(pos, dur);
   maybePreload();

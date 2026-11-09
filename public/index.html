@@ -12,7 +12,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/css/styles.css?v=20261106a">
+<link rel="stylesheet" href="/css/styles.css?v=20261109f">
 <link rel="icon" type="image/png" sizes="64x64" href="/img/icon.png">
 <link rel="apple-touch-icon" href="/img/icon-180.png">
 </head>
@@ -51,6 +51,34 @@
     <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v2.4M12 18.6V21M4.7 7.5l2.1 1.2M17.2 15.3l2.1 1.2M4.7 16.5l2.1-1.2M17.2 8.7l2.1-1.2"/></symbol>
     <symbol id="i-moon" viewBox="0 0 24 24"><path d="M18.7 14.8A7.5 7.5 0 0 1 9.2 5.3a7 7 0 1 0 9.5 9.5Z"/></symbol>
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v10M7.5 10.5 12 15l4.5-4.5"/><path d="M4.5 19.5h15"/></symbol>
+
+    <symbol id="i-lf-shuffle" viewBox="0 0 24 24">
+      <path d="M3.4 7h3.2l10.2 10h3.4" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M3.4 17h3.2l10.2-10h3.4" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M16.6 4.2 20.2 7l-3.6 2.8" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M16.6 14.2 20.2 17l-3.6 2.8" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-lf-prev" viewBox="0 0 24 24">
+      <rect x="4.4" y="5" width="2.8" height="14" rx="1.4" fill="currentColor"/>
+      <path d="M19.4 5.4 9.4 12l10 6.6z" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-lf-play" viewBox="0 0 24 24">
+      <path d="M8.4 5.1 19.6 12 8.4 18.9z" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-lf-pause" viewBox="0 0 24 24">
+      <rect x="7.1" y="5" width="3.7" height="14" rx="1.85" fill="currentColor"/>
+      <rect x="13.2" y="5" width="3.7" height="14" rx="1.85" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-lf-next" viewBox="0 0 24 24">
+      <rect x="16.8" y="5" width="2.8" height="14" rx="1.4" fill="currentColor"/>
+      <path d="M4.6 5.4 14.6 12l-10 6.6z" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-lf-repeat" viewBox="0 0 24 24">
+      <path d="M7 6.6h8.6a4 4 0 0 1 4 4v.6" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M17 17.4H8.4a4 4 0 0 1-4-4v-.6" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M15.6 3.6 19.4 6.6l-3.8 3" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M8.4 20.4 4.6 17.4l3.8-3" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -180,6 +208,56 @@
     </div>
   </footer>
   </div>
+
+  <section class="lyr-focus" id="lyrFocus" hidden aria-label="Lyrics">
+    <div class="lf-bg" aria-hidden="true"><img id="lfBg" alt=""></div>
+
+    <button class="lf-close" id="lfClose" type="button" title="Back (Esc)" aria-label="Back">
+      <svg class="ic"><use href="#i-back"/></svg>
+    </button>
+
+    <div class="lf-inner">
+      <aside class="lf-side">
+        <div class="lf-art" id="lfArt"></div>
+        <div class="lf-meta">
+          <p class="eyebrow" id="lfSource">Lyrics</p>
+          <h2 id="lfTitle"></h2>
+          <p class="lf-by" id="lfBy"></p>
+        </div>
+        <div class="lf-seek">
+          <input type="range" id="lfSeek" min="0" max="100" value="0" step="1" aria-label="Seek">
+          <div class="lf-times"><span id="lfCur">0:00</span><span id="lfDur">--:--</span></div>
+        </div>
+
+        <div class="lf-transport">
+          <button class="icon-btn" id="lfShuffle" type="button" title="Shuffle" aria-label="Shuffle" aria-pressed="false">
+            <svg class="ic ic-lf"><use href="#i-lf-shuffle"/></svg>
+          </button>
+          <button class="icon-btn" id="lfPrev" type="button" title="Previous" aria-label="Previous">
+            <svg class="ic ic-lf"><use href="#i-lf-prev"/></svg>
+          </button>
+          <button class="lf-play" id="lfPlay" type="button" title="Play" aria-label="Play">
+            <svg class="ic ic-lf play-ic"><use href="#i-lf-play"/></svg>
+            <svg class="ic ic-lf pause-ic"><use href="#i-lf-pause"/></svg>
+          </button>
+          <button class="icon-btn" id="lfNext" type="button" title="Next" aria-label="Next">
+            <svg class="ic ic-lf"><use href="#i-lf-next"/></svg>
+          </button>
+          <button class="icon-btn" id="lfRepeat" type="button" title="Repeat off" aria-label="Repeat" aria-pressed="false">
+            <svg class="ic ic-lf"><use href="#i-lf-repeat"/></svg>
+            <em class="one">1</em>
+          </button>
+        </div>
+      </aside>
+
+      <section class="lf-main">
+        <div class="lf-scroll" id="lfScroll">
+          <div class="lyrics-body" id="lfBody"></div>
+        </div>
+        <div class="lyr-tools" id="lfTools"></div>
+      </section>
+    </div>
+  </section>
 </div>
 
 <nav class="win-controls" aria-label="Window controls">
@@ -549,6 +627,6 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script type="module" src="/js/app.js?v=20261108a"></script>
+<script type="module" src="/js/app.js?v=20261109f"></script>
 </body>
 </html>
