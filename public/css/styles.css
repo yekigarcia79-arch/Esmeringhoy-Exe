@@ -2072,6 +2072,41 @@ input[type="range"]:hover::-moz-range-thumb { opacity: 1; }
   color: var(--ink-4);
 }
 
+/* The consent line sits directly above the button it unlocks, so the reason
+   the button is grey is the thing immediately under the cursor. */
+.terms-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 2px 0 16px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink-3);
+  cursor: pointer;
+  user-select: none;
+}
+
+.terms-row input {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 1px 0 0;
+  accent-color: var(--ink);
+  cursor: pointer;
+}
+
+.terms-row a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--line-3);
+}
+
+.terms-row a:hover { text-decoration-color: var(--ink); }
+
+.terms-row.bad span { color: var(--ink); }
+.terms-row.bad input { outline: 2px solid var(--ink); outline-offset: 2px; }
+
 @media (max-width: 860px) {
   .auth-split {
     grid-template-columns: minmax(0, 1fr);

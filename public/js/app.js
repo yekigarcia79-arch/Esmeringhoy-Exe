@@ -2960,6 +2960,27 @@ function authNotice(msg) {
 let codeSent = false;
 let codeEmail = '';
 
+// The button stays grey until the box is ticked, and goes grey again if it is
+// unticked — the loading state wins while a request is in flight.
+function syncTermsGate() {
+  const btn = $('#authSubmit');
+  if (!btn || btn.classList.contains('is-loading')) return;
+  btn.disabled = authMode === 'register' && !$('#termsAgree').checked;
+}
+
+$('#termsAgree').addEventListener('change', () => {
+  $('#termsRow').classList.remove('bad');
+  syncTermsGate();
+});
+
+// The terms live on the site; opening them here would replace the app with a
+// web page and no way back. Hand it to the system browser instead.
+$('#termsLink').addEventListener('click', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  invoke('open_url', { url: 'https://esmeringhoy.pages.dev/terms' }).catch(() => {});
+});
+
 function renderAuthFields() {
   const isCode = authMode === 'code';
   const isRegister = authMode === 'register';
@@ -2969,6 +2990,10 @@ function renderAuthFields() {
   $('#fieldPass').hidden = isCode;
   $('#authConfirmField').hidden = !isRegister;
   $('#fieldInvite').hidden = !isRegister || regMode !== 'invite';
+
+  // Consent is asked for once, where an account is made — never on sign-in.
+  $('#termsRow').hidden = !isRegister;
+  syncTermsGate();
 
   // A "copy code" link carries the code but not necessarily the address, so
   // the email field stays available until we know which mailbox it belongs to.
@@ -3347,6 +3372,13 @@ $('#authForm').addEventListener('submit', async (e) => {
     return authError(`Password must be at least ${MIN_PASSWORD} characters.`);
   }
 
+  if (authMode === 'register' && !$('#termsAgree').checked) {
+    $('#termsRow').classList.add('bad');
+    $('#termsAgree').focus();
+    return authError('Agree to the Terms of Service to create an account.');
+  }
+  $('#termsRow').classList.remove('bad');
+
   if (authMode === 'register' && password !== $('#authPass2').value) {
     return authError('The two passwords do not match.');
   }
@@ -3369,6 +3401,7 @@ $('#authForm').addEventListener('submit', async (e) => {
         password,
         email: $('#authEmail').value.trim() || undefined,
         invite: $('#authInvite').value.trim() || undefined,
+        terms: $('#termsAgree').checked,
       });
 
       // The account exists but is not signed in: it stays inert until the
@@ -3408,7 +3441,7 @@ $('#authForm').addEventListener('submit', async (e) => {
     }
     authError(msg || 'Something went wrong.');
   } finally {
-    btn.disabled = false;
+    btn.disabled = authMode === 'register' && !$('#termsAgree').checked;
     btn.classList.remove("is-loading");
     $("#authSubmit .btn-label").textContent = label;
   }

@@ -99,6 +99,7 @@ pub async fn auth_register(
     password: String,
     email: Option<String>,
     invite: Option<String>,
+    terms: Option<bool>,
 ) -> Result<Value, String> {
     let username = username.trim().to_string();
     if username.is_empty() || password.is_empty() {
@@ -110,6 +111,11 @@ pub async fn auth_register(
     }
     if let Some(i) = invite.filter(|i| !i.trim().is_empty()) {
         body["invite"] = json!(i.trim());
+    }
+    // Recorded by the server as users.terms_accepted_at. Sent only when true,
+    // so an older server that does not know the field sees no change at all.
+    if terms.unwrap_or(false) {
+        body["terms"] = json!(true);
     }
 
     let r = state
