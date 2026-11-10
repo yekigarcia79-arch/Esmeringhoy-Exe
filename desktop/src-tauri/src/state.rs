@@ -40,6 +40,8 @@ pub struct Prefs {
     #[serde(default)]
     pub reduce_motion: bool,
     #[serde(default)]
+    pub draggable_waveforms: bool,
+    #[serde(default)]
     pub discord_rpc_enabled: bool,
     #[serde(default = "default_discord_client_id")]
     pub discord_client_id: String,
@@ -57,6 +59,7 @@ impl Default for Prefs {
             auto_update_check: true,
             ambient_artwork: true,
             reduce_motion: false,
+            draggable_waveforms: false,
             discord_rpc_enabled: false,
             discord_client_id: default_discord_client_id(),
             discord_large_image_key: default_logo(),

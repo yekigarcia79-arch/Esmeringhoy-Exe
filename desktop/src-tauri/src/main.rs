@@ -78,6 +78,8 @@ fn main() {
             commands::settings_get,
             commands::general_set,
             commands::appearance_set,
+            commands::waveforms_set,
+            commands::waveform_peaks,
             commands::discord_rpc_set,
             commands::discord_rpc_sync,
             commands::api_base,

@@ -37,6 +37,7 @@ const DEFAULT_SETTINGS = {
   autoUpdateCheck: true,
   ambientArtwork: true,
   reduceMotion: false,
+  draggableWaveforms: false,
   discord: {
     enabled: false,
     status: 'Disabled',
@@ -71,6 +72,13 @@ let lyricsSwitching = false;
 let lyrFocusOpen = false;
 let lyrReturnView = 'home';
 let lfScrubbing = false;
+let waveformsActive = false;
+let waveformCache = new Map();
+let waveformTrackId = '';
+let waveformLoadingId = '';
+let waveformData = [];
+let waveformLastDraw = 0;
+let lfWaveDragging = false;
 let lyrAutoTry = { videoId: '', count: 0 };
 let lyrAutoPending = false;
 
@@ -1758,6 +1766,7 @@ function renderLyricsFocus() {
   $('#lfTools').innerHTML = cur && !videoMode ? lyricsToolsHtml(lyr) : '';
 
   if (scroller) scroller.scrollTop = keep;
+  if (waveformsActive && lyrFocusOpen) ensureWaveform();
   paintLyricsFocus();
 }
 
@@ -1792,6 +1801,17 @@ function paintLyricsFocus() {
   const durEl = $('#lfDur');
   const durText = dur ? fmt(dur) : '--:--';
   if (durEl && durEl.textContent !== durText) durEl.textContent = durText;
+
+  if (!volumeDragging) {
+    const vol = Math.max(0, Math.min(100, Math.round(Number(S.volume) || 0)));
+    const volume = $('#lfVolume');
+    if (volume && Number(volume.value) !== vol) {
+      volume.value = String(vol);
+      setFill(volume, vol);
+    }
+    const volNum = $('#lfVolNum');
+    if (volNum && volNum.textContent !== String(vol)) volNum.textContent = vol;
+  }
 
   const play = $('#lfPlay');
   if (play) {
@@ -1835,6 +1855,260 @@ function paintLyricsFocus() {
     const off = !(S.queueCount > 0 || S.playlistActive);
     if (next.disabled !== off) next.disabled = off;
   }
+
+  if (waveformsActive && lyrFocusOpen) updateWaveformUi();
+}
+
+function waveformDuration() {
+  const value = audio.duration && isFinite(audio.duration) ? audio.duration : Number(S?.current?.durationSec) || 0;
+  return Math.max(0, value);
+}
+
+function setWaveformStatus(text) {
+  const el = $('#lfWaveState');
+  if (!el) return;
+  el.textContent = text || '';
+  el.hidden = !text;
+}
+
+function drawWaveform() {
+  const wave = $('#lfWave');
+  const canvas = $('#lfWaveCanvas');
+  if (!wave || !canvas || !wave.classList.contains('is-open')) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const width = rect.width;
+  const height = rect.height;
+  if (width < 2 || height < 2) return;
+
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const pxWidth = Math.round(width * dpr);
+  const pxHeight = Math.round(height * dpr);
+  if (canvas.width !== pxWidth || canvas.height !== pxHeight) {
+    canvas.width = pxWidth;
+    canvas.height = pxHeight;
+  }
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const padX = 12;
+  const innerWidth = Math.max(1, width - padX * 2);
+  const top = 18;
+  const bottom = 8;
+  const mid = (height + top - bottom) / 2;
+  const maxAmp = Math.max(1, (height - top - bottom) / 2);
+  const duration = waveformDuration();
+
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.07)';
+  for (let i = 0; i <= 4; i++) {
+    const x = Math.round(padX + (innerWidth * i) / 4);
+    ctx.fillRect(x, top - 4, 1, height - top - bottom + 8);
+  }
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.11)';
+  ctx.fillRect(padX, mid, innerWidth, 1);
+
+  ctx.font = '500 9px "JetBrains Mono", Consolas, monospace';
+  ctx.fillStyle = 'rgba(247, 247, 247, 0.44)';
+  ctx.textBaseline = 'top';
+  for (let i = 0; i <= 4; i++) {
+    const x = padX + (innerWidth * i) / 4;
+    const time = i === 4 ? duration : duration * (i / 4);
+    ctx.textAlign = i === 0 ? 'left' : i === 4 ? 'right' : 'center';
+    ctx.fillText(duration ? fmt(time) : '--:--', x, 4);
+  }
+
+  if (!waveformData.length) return;
+
+  const progress = duration > 0 ? Math.max(0, Math.min(1, (audio.currentTime || 0) / duration)) : 0;
+  const columns = Math.max(96, Math.floor(innerWidth / 1.3));
+  const slot = innerWidth / columns;
+  const topPoints = [];
+  const bottomPoints = [];
+
+  for (let i = 0; i < columns; i++) {
+    const from = Math.floor((i / columns) * waveformData.length);
+    const to = Math.max(from + 1, Math.floor(((i + 1) / columns) * waveformData.length));
+    let peak = 0;
+    let sum = 0;
+    let count = 0;
+    for (let j = from; j < to && j < waveformData.length; j++) {
+      const value = Number(waveformData[j]) || 0;
+      peak = Math.max(peak, value);
+      sum += value;
+      count += 1;
+    }
+    const energy = count ? sum / count : 0;
+    const level = Math.max(0, Math.min(1, (0.62 * energy + 0.38 * peak - 0.1) / 0.9));
+    const half = Math.max(0.7, Math.pow(level, 1.08) * maxAmp);
+    const x = padX + i * slot;
+    topPoints.push([x, mid - half]);
+    bottomPoints.push([x, mid + half]);
+  }
+
+  const path = new Path2D();
+  path.moveTo(topPoints[0][0], topPoints[0][1]);
+  for (let i = 1; i < topPoints.length; i++) path.lineTo(topPoints[i][0], topPoints[i][1]);
+  for (let i = bottomPoints.length - 1; i >= 0; i--) path.lineTo(bottomPoints[i][0], bottomPoints[i][1]);
+  path.closePath();
+
+  const baseFill = ctx.createLinearGradient(0, top, 0, height - bottom);
+  baseFill.addColorStop(0, 'rgba(247, 247, 247, 0.18)');
+  baseFill.addColorStop(0.5, 'rgba(247, 247, 247, 0.28)');
+  baseFill.addColorStop(1, 'rgba(247, 247, 247, 0.18)');
+  ctx.fillStyle = baseFill;
+  ctx.fill(path);
+  ctx.strokeStyle = 'rgba(247, 247, 247, 0.30)';
+  ctx.lineWidth = 0.8;
+  ctx.stroke(path);
+
+  const playheadX = Math.max(padX, Math.min(width - padX, padX + innerWidth * progress));
+  if (progress > 0) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, playheadX, height);
+    ctx.clip();
+    ctx.fillStyle = 'rgba(247, 247, 247, 0.42)';
+    ctx.fill(path);
+    ctx.restore();
+  }
+
+  ctx.fillStyle = 'rgba(247, 247, 247, 0.82)';
+  ctx.fillRect(playheadX - 0.5, 2, 1.5, height - 4);
+  ctx.beginPath();
+  ctx.arc(playheadX, 4, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function updateWaveformUi() {
+  const wave = $('#lfWave');
+  if (!wave || !wave.classList.contains('is-open')) return;
+
+  const duration = waveformDuration();
+  const position = Math.max(0, Math.min(duration || 0, audio.currentTime || 0));
+  const max = Math.max(1, Math.round(duration || 1));
+  const now = Math.max(0, Math.min(max, Math.round(position)));
+  if (wave.getAttribute('aria-valuemax') !== String(max)) wave.setAttribute('aria-valuemax', String(max));
+  if (wave.getAttribute('aria-valuenow') !== String(now)) wave.setAttribute('aria-valuenow', String(now));
+  const text = `${fmt(position)} of ${fmt(duration)}`;
+  if (wave.getAttribute('aria-valuetext') !== text) wave.setAttribute('aria-valuetext', text);
+
+  const stamp = performance.now();
+  if (stamp - waveformLastDraw < 80) return;
+  waveformLastDraw = stamp;
+  drawWaveform();
+}
+
+async function ensureWaveform() {
+  if (!waveformsActive || !lyrFocusOpen) return;
+  const id = S?.current?.videoId || '';
+  if (!id) return;
+
+  if (waveformTrackId === id && (waveformData.length || waveformLoadingId === id)) {
+    if (waveformData.length) requestAnimationFrame(drawWaveform);
+    return;
+  }
+
+  waveformTrackId = id;
+  if (waveformCache.has(id)) {
+    waveformData = waveformCache.get(id);
+    waveformLoadingId = '';
+    setWaveformStatus('');
+    drawWaveform();
+    requestAnimationFrame(drawWaveform);
+    return;
+  }
+
+  waveformData = [];
+  waveformLoadingId = id;
+  setWaveformStatus('Preparing waveform…');
+  drawWaveform();
+
+  try {
+    const peaks = await invoke('waveform_peaks', { videoId: id });
+    if (!Array.isArray(peaks) || !peaks.length) throw new Error('no waveform returned');
+    waveformCache.set(id, peaks);
+    if (S?.current?.videoId !== id) return;
+    waveformData = peaks;
+    if (waveformsActive && lyrFocusOpen) {
+      setWaveformStatus('');
+      drawWaveform();
+      requestAnimationFrame(drawWaveform);
+    }
+  } catch (e) {
+    if (S?.current?.videoId === id) {
+      waveformData = [];
+      setWaveformStatus('Waveform unavailable');
+      drawWaveform();
+    }
+    try { invoke('web_log', { message: `[waveform] ${e}` }); } catch {}
+  } finally {
+    if (waveformLoadingId === id) waveformLoadingId = '';
+  }
+}
+
+function seekWaveform(clientX) {
+  const wave = $('#lfWave');
+  const duration = waveformDuration();
+  if (!wave || duration <= 0) return;
+  const rect = wave.getBoundingClientRect();
+  if (!rect.width) return;
+  const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  const target = Math.min(duration - SEEK_END_GUARD_SECS, Math.max(0, fraction * duration));
+  audio.currentTime = target;
+  updateWaveformUi();
+}
+
+function seekWaveformBy(seconds) {
+  const duration = waveformDuration();
+  if (duration <= 0) return;
+  const target = Math.max(0, Math.min(duration - SEEK_END_GUARD_SECS, seconds));
+  audio.currentTime = target;
+  updateWaveformUi();
+  flushPendingSeek();
+}
+
+$('#lfWave').addEventListener('pointerdown', (e) => {
+  if (!waveformsActive) return;
+  e.preventDefault();
+  lfWaveDragging = true;
+  e.currentTarget.focus({ preventScroll: true });
+  try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+  seekWaveform(e.clientX);
+});
+$('#lfWave').addEventListener('pointermove', (e) => {
+  if (!lfWaveDragging) return;
+  e.preventDefault();
+  seekWaveform(e.clientX);
+});
+const finishWaveformDrag = (e) => {
+  if (!lfWaveDragging) return;
+  lfWaveDragging = false;
+  try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+  flushPendingSeek();
+};
+$('#lfWave').addEventListener('pointerup', finishWaveformDrag);
+$('#lfWave').addEventListener('pointercancel', finishWaveformDrag);
+$('#lfWave').addEventListener('keydown', (e) => {
+  const duration = waveformDuration();
+  if (duration <= 0) return;
+  const current = audio.currentTime || 0;
+  let target = null;
+  if (e.key === 'ArrowLeft') target = current - (e.shiftKey ? 15 : 5);
+  if (e.key === 'ArrowRight') target = current + (e.shiftKey ? 15 : 5);
+  if (e.key === 'Home') target = 0;
+  if (e.key === 'End') target = duration - SEEK_END_GUARD_SECS;
+  if (target === null) return;
+  e.preventDefault();
+  seekWaveformBy(target);
+});
+
+if (window.ResizeObserver) {
+  new ResizeObserver(() => {
+    if (waveformsActive) drawWaveform();
+  }).observe($('#lfWave'));
 }
 
 function openLyricsFocus() {
@@ -1849,6 +2123,7 @@ function openLyricsFocus() {
   // state to come from. Setting both in one tick is what makes it snap.
   void el.offsetWidth;
   requestAnimationFrame(() => el.classList.add('in'));
+  if (waveformsActive && settingsState.draggableWaveforms) ensureWaveform();
 }
 
 function closeLyricsFocus() {
@@ -2508,7 +2783,7 @@ document.addEventListener('keydown', (e) => {
 for (const el of document.querySelectorAll('.topbar, .auth, .gate, .lyr-focus')) {
   el.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
-    if (e.target.closest('button, a, input, select, textarea, label, .search, .user, .sug')) return;
+    if (e.target.closest('button, a, input, select, textarea, label, .search, .user, .sug, .lf-wave')) return;
     try { appWindow?.startDragging?.(); } catch {}
   });
 }
@@ -2541,6 +2816,25 @@ $('#volume').addEventListener('input', (e) => {
 $('#volume').addEventListener('change', (e) => {
   volumeDragging = false;
   send('volume', { pct: Number(e.target.value) }, { silent: true });
+});
+
+$('#lfVolume').addEventListener('input', (e) => {
+  volumeDragging = true;
+  const v = Number(e.target.value);
+  if (S) S.volume = v;
+  setFill(e.target, v);
+  $('#lfVolNum').textContent = v;
+  audio.volume = Math.max(0, Math.min(1, v / 100));
+});
+$('#lfVolume').addEventListener('change', (e) => {
+  volumeDragging = false;
+  send('volume', { pct: Number(e.target.value) });
+});
+
+$('#lfWaveToggle').addEventListener('click', () => {
+  if (!settingsState.draggableWaveforms) return;
+  waveformsActive = !waveformsActive;
+  syncWaveformsUi();
 });
 
 $('#btnMute').addEventListener('click', () => {
@@ -3481,6 +3775,7 @@ function applySettingsState(settings) {
     autoUpdateCheck: settings.autoUpdateCheck !== false,
     ambientArtwork: settings.ambientArtwork !== false,
     reduceMotion: settings.reduceMotion === true,
+    draggableWaveforms: settings.draggableWaveforms === true,
     discord: {
       enabled: discord.enabled === true,
       status: discord.status || 'Disabled',
@@ -3492,9 +3787,52 @@ function applySettingsState(settings) {
   setSwitch('#autoUpdateToggle', settingsState.autoUpdateCheck);
   setSwitch('#ambientToggle', settingsState.ambientArtwork);
   setSwitch('#reduceMotionToggle', settingsState.reduceMotion);
+  setSwitch('#waveformsToggle', settingsState.draggableWaveforms);
   setSwitch('#discordEnabled', settingsState.discord.enabled);
 
   paintDiscordStatus();
+  syncWaveformsUi();
+}
+
+function syncWaveformsUi() {
+  const available = settingsState.draggableWaveforms === true;
+  if (!available) waveformsActive = false;
+
+  const button = $('#lfWaveToggle');
+  if (button) {
+    button.hidden = !available;
+    button.classList.toggle('is-on', available && waveformsActive);
+    button.setAttribute('aria-pressed', available && waveformsActive ? 'true' : 'false');
+    button.setAttribute(
+      'aria-label',
+      available && waveformsActive
+        ? 'Disable draggable audio waveforms'
+        : 'Enable draggable audio waveforms',
+    );
+    button.title = available && waveformsActive
+      ? 'Draggable audio waveforms: on'
+      : 'Draggable audio waveforms: off';
+  }
+
+  const volume = $('.lf-volume');
+  if (volume) {
+    const hidden = available && waveformsActive;
+    volume.classList.toggle('is-hidden', hidden);
+    if (hidden) volume.setAttribute('aria-hidden', 'true');
+    else volume.removeAttribute('aria-hidden');
+  }
+
+  const wave = $('#lfWave');
+  const showWave = available && waveformsActive;
+  if (wave) {
+    wave.classList.toggle('is-open', showWave);
+    wave.setAttribute('aria-hidden', showWave ? 'false' : 'true');
+    wave.tabIndex = showWave ? 0 : -1;
+    if (!showWave) lfWaveDragging = false;
+  }
+  const layer = $('#lyrFocus');
+  if (layer) layer.classList.toggle('is-waveforming', showWave);
+  if (showWave && lyrFocusOpen) ensureWaveform();
 }
 
 function paintDiscordStatus() {
@@ -3642,6 +3980,14 @@ $('#reduceMotionToggle')?.addEventListener('click', async () => {
   const settings = await invoke('appearance_set', {
     ambientArtwork: settingsState.ambientArtwork,
     reduceMotion: !settingsState.reduceMotion,
+  }).catch(() => null);
+  if (settings) applySettingsState(settings);
+  else toast('Could not update that setting');
+});
+
+$('#waveformsToggle')?.addEventListener('click', async () => {
+  const settings = await invoke('waveforms_set', {
+    enabled: !settingsState.draggableWaveforms,
   }).catch(() => null);
   if (settings) applySettingsState(settings);
   else toast('Could not update that setting');

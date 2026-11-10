@@ -5,11 +5,14 @@ use crate::keystore;
 use crate::state::AppState;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::fs::File;
+use std::io::BufReader;
 use std::sync::Arc;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
+use rodio::Source;
 
 fn settings_json(state: &AppState) -> Value {
     let prefs = state.prefs.lock().unwrap().clone();
@@ -17,6 +20,7 @@ fn settings_json(state: &AppState) -> Value {
         "autoUpdateCheck": prefs.auto_update_check,
         "ambientArtwork": prefs.ambient_artwork,
         "reduceMotion": prefs.reduce_motion,
+        "draggableWaveforms": prefs.draggable_waveforms,
         "discord": state.discord.settings(),
     })
 }
@@ -424,6 +428,124 @@ pub fn appearance_set(
     }
     state.save_prefs().map_err(|e| e.to_string())?;
     Ok(settings_json(&state))
+}
+
+#[tauri::command]
+pub fn waveforms_set(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<Value, String> {
+    {
+        let mut prefs = state.prefs.lock().unwrap();
+        prefs.draggable_waveforms = enabled;
+    }
+    state.save_prefs().map_err(|e| e.to_string())?;
+    Ok(settings_json(&state))
+}
+
+fn valid_waveform_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 20
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn decode_waveform(path: &Path) -> Result<Vec<f32>, String> {
+    let file = File::open(path).map_err(|e| format!("opening audio for waveform: {e}"))?;
+    let decoder = rodio::Decoder::new(BufReader::new(file))
+        .map_err(|e| format!("decoding audio for waveform: {e}"))?;
+
+    let channels = decoder.channels().get() as usize;
+    let rate = decoder.sample_rate().get() as usize;
+    let target_buckets = 4096usize;
+    let bucket = decoder
+        .total_duration()
+        .map(|d| {
+            ((d.as_secs_f64() * rate as f64 * channels as f64) / target_buckets as f64)
+                .ceil()
+                .max(1.0) as usize
+        })
+        .unwrap_or(8192)
+        .max(256);
+
+    let mut peaks = Vec::with_capacity(target_buckets);
+    let mut peak = 0.0f32;
+    let mut count = 0usize;
+    for sample in decoder {
+        let amp = sample.abs();
+        if amp.is_finite() && amp > peak {
+            peak = amp;
+        }
+        count += 1;
+        if count >= bucket {
+            peaks.push(peak);
+            peak = 0.0;
+            count = 0;
+        }
+    }
+    if count > 0 {
+        peaks.push(peak);
+    }
+    if peaks.is_empty() {
+        return Err("the track has no audio samples".into());
+    }
+
+    let max = peaks.iter().copied().fold(0.0f32, f32::max);
+    if max > 0.0 {
+        for value in &mut peaks {
+            *value = (*value / max).clamp(0.0, 1.0);
+        }
+    }
+    Ok(peaks)
+}
+
+#[tauri::command]
+pub async fn waveform_peaks(
+    state: State<'_, Arc<AppState>>,
+    video_id: String,
+) -> Result<Vec<f32>, String> {
+    if !valid_waveform_id(&video_id) {
+        return Err("invalid track id".into());
+    }
+
+    let cache = Arc::clone(&state.cache);
+    if let Some(cached) = cache.lookup(&video_id, "m4a") {
+        return tauri::async_runtime::spawn_blocking(move || decode_waveform(&cached))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    let api = Arc::clone(&state.api);
+    let temp = std::env::temp_dir().join(format!("esm-wave-{}-{video_id}.m4a", std::process::id()));
+    let _ = std::fs::remove_file(&temp);
+
+    let mut downloaded = false;
+    if let Ok(resolved) = crate::youtube::resolve(&video_id).await {
+        downloaded = api
+            .download_ranged(&resolved.url, &temp, |_, _| {}, None)
+            .await
+            .is_ok();
+    }
+    if !downloaded {
+        if let Err(e) = api
+            .download_ranged(
+                &format!("/api/stream/{video_id}?codec=aac"),
+                &temp,
+                |_, _| {},
+                None,
+            )
+            .await
+        {
+            let _ = std::fs::remove_file(&temp);
+            return Err(format!("downloading audio for waveform: {e}"));
+        }
+    }
+
+    let path = temp.clone();
+    let decoded = tauri::async_runtime::spawn_blocking(move || decode_waveform(&path)).await;
+    let _ = std::fs::remove_file(&temp);
+    decoded.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
