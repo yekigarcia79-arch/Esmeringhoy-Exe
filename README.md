@@ -39,6 +39,9 @@ native shell with a Rust audio engine and a WebView2 interface.
   login required.
 - **Video mode** — for tracks with a music video, the picture plays muted
   against the audio clock.
+- **Draggable waveform** — enable it under **Settings → Appearance**, then
+  use the waveform button in fullscreen lyrics. Drag the decoded track
+  waveform to seek; its playhead follows playback.
 - **Discord Rich Presence** — show what's playing in your Discord status,
   with the track artwork and a live progress bar.
 - **Native window** — frameless, rounded corners, fixed size, fullscreen from
@@ -76,11 +79,14 @@ whatever was playing.
 | Move the window | Drag anywhere on the title bar |
 | Minimize / fullscreen / close | Title-bar buttons |
 
-**Settings** (click your username) covers playback and storage:
+**Settings** (click your username) covers playback, storage and appearance:
 
 - **Cache limit** — 5 GB (default) or 10 GB, with live usage and track count.
 - **Clear cache** — frees space; playback continues and the playing track is
   kept.
+- **Draggable audio waveforms** — under **Appearance**, reveal the waveform
+  button in fullscreen lyrics. Activating it hides the volume indicator and
+  shows the current track's waveform; drag or use the arrow keys to seek.
 - **Discord RPC** — toggle Rich Presence on or off.
 - **Check for updates** — see the installed version and check for a release.
 
