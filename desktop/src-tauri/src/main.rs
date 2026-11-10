@@ -8,6 +8,7 @@ mod engine;
 mod keystore;
 mod preload;
 mod state;
+mod tray;
 mod youtube;
 
 use state::AppState;
@@ -16,6 +17,9 @@ use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_main(app);
+        }))
         .setup(|app| {
             let data_dir = app
                 .path()
@@ -44,6 +48,11 @@ fn main() {
                     }
                     None => eprintln!("no window icon available"),
                 }
+            }
+
+            match tray::init(app.handle()) {
+                Ok(()) => tray::install_close_handler(app.handle()),
+                Err(e) => eprintln!("system tray is unavailable: {e}"),
             }
 
             Ok(())

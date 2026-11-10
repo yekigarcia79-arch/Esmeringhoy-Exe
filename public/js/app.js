@@ -526,6 +526,22 @@ listen('discord:status', (e) => {
   setSwitch('#discordEnabled', settingsState.discord.enabled);
   paintDiscordStatus();
 });
+listen('tray:lyrics', () => {
+  if (!me) {
+    showAuth('login');
+    return;
+  }
+  if (!S) return;
+  if (S.view !== 'lyrics') go('lyrics');
+  else openLyricsFocus();
+});
+listen('tray:settings', () => {
+  if (!me) {
+    showAuth('login');
+    return;
+  }
+  openSettings();
+});
 
 async function refreshDownloadedBadges() {
   if (!plDetail?.tracks?.length) return;

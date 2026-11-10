@@ -25,7 +25,7 @@ fn settings_json(state: &AppState) -> Value {
     })
 }
 
-fn sync_discord(state: &AppState) {
+pub(crate) fn sync_discord(state: &AppState) {
     let track = state.engine.current();
     let view = state.engine.state();
     let paused = view.state == "paused";
@@ -960,16 +960,20 @@ pub async fn install_update(app: AppHandle, url: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub fn open_url(url: String) -> Result<(), String> {
+pub(crate) fn open_https_url(url: &str) -> Result<(), String> {
     if !url.starts_with("https://") {
         return Err("only https links".into());
     }
     std::process::Command::new("cmd")
-        .args(["/C", "start", "", &url])
+        .args(["/C", "start", "", url])
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    open_https_url(&url)
 }
 
 #[tauri::command]
