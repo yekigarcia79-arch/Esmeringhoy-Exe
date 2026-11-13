@@ -370,6 +370,12 @@
 
         <p class="auth-error" id="authError" role="alert"></p>
 
+        <div class="captcha-box" id="captchaSlot" hidden>
+          <iframe class="captcha-frame" id="captchaFrame" title="Cloudflare verification"
+                  scrolling="no" referrerpolicy="no-referrer"></iframe>
+          <p class="captcha-hint" id="captchaHint" hidden></p>
+        </div>
+
         <label class="terms-row" id="termsRow" hidden>
           <input type="checkbox" id="termsAgree">
           <span>I agree to the <a href="https://esmeringhoy.pages.dev/terms" id="termsLink" target="_blank" rel="noopener">Terms of Service</a>.</span>

@@ -2273,6 +2273,36 @@ input[type="range"]:hover::-moz-range-thumb { opacity: 1; }
 .terms-row.bad span { color: var(--ink); }
 .terms-row.bad input { outline: 2px solid var(--ink); outline-offset: 2px; }
 
+/* Cloudflare Turnstile. The widget is framed from the site rather than drawn
+   here: it only issues tokens to a page on a hostname the site key lists, and
+   this document's origin is tauri.localhost. The frame is the real widget —
+   300x65, exactly as Cloudflare renders it. */
+.captcha-box {
+  margin: 0 0 16px;
+}
+
+.captcha-frame {
+  display: block;
+  width: 300px;
+  max-width: 100%;
+  height: 65px;
+  border: 0;
+  background: transparent;
+  color-scheme: dark;
+}
+
+.captcha-box[hidden] { display: none; }
+
+.captcha-hint {
+  margin: 8px 0 0;
+  font: 400 10.5px/1.5 var(--font-mono);
+  letter-spacing: 0.02em;
+  color: var(--ink-4);
+}
+
+.captcha-hint.bad { color: var(--ink-2); }
+.captcha-hint[hidden] { display: none; }
+
 @media (max-width: 860px) {
   .auth-split {
     grid-template-columns: minmax(0, 1fr);

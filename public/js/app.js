@@ -3291,6 +3291,117 @@ $('#termsLink').addEventListener('click', (e) => {
   invoke('open_url', { url: 'https://esmeringhoy.pages.dev/terms' }).catch(() => {});
 });
 
+// ── Cloudflare Turnstile ───────────────────────────────────────────────
+// The widget is framed from the site, not drawn here. Turnstile only issues
+// tokens to a page served from a hostname the site key lists, and this
+// document's origin is http://tauri.localhost — a hostname no site key can
+// list. So the frame loads /captcha on the real domain, where the widget is
+// first-party, and posts the token up. The CSP allows exactly that origin.
+let captchaCfg = { required: false, siteKey: '' };
+let captchaConfigLoad = null;
+let captchaToken = '';
+let captchaError = '';
+
+function captchaOrigin() {
+  try { return new URL(API_BASE).origin; } catch { return 'https://esmeringhoy.pages.dev'; }
+}
+
+function captchaNeeded() {
+  return captchaCfg.required
+    && (authMode === 'login' || authMode === 'register' || authMode === 'code');
+}
+
+function loadCaptchaConfig() {
+  if (captchaConfigLoad) return captchaConfigLoad;
+  captchaConfigLoad = invoke('captcha_status')
+    .then((cfg) => {
+      captchaCfg = {
+        required: cfg?.required === true,
+        siteKey: String(cfg?.siteKey || ''),
+      };
+      mountCaptcha();
+      return captchaCfg;
+    })
+    .catch(() => {
+      // Do not cache a failed lookup: the next submit retries instead of
+      // silently skipping a check the server would still enforce.
+      captchaConfigLoad = null;
+      return captchaCfg;
+    });
+  return captchaConfigLoad;
+}
+
+function renderCaptchaHint() {
+  const hint = $('#captchaHint');
+  if (!hint) return;
+  hint.textContent = captchaError || '';
+  hint.hidden = !captchaError;
+  hint.classList.toggle('bad', Boolean(captchaError));
+}
+
+// Mounted once per origin; the frame is only pointed at the page when the
+// current tab actually needs it, so signing in never loads Cloudflare.
+function mountCaptcha() {
+  const box = $('#captchaSlot');
+  const frame = $('#captchaFrame');
+  if (!box || !frame) return;
+
+  box.hidden = !captchaNeeded();
+  if (box.hidden) return;
+
+  const src = `${captchaOrigin()}/captcha?embed=1&theme=dark`;
+  if (frame.dataset.mounted === src) return;
+  frame.dataset.mounted = src;
+  captchaToken = '';
+  captchaError = '';
+  renderCaptchaHint();
+  frame.src = src;
+}
+
+function resetCaptcha() {
+  captchaToken = '';
+  captchaError = '';
+  renderCaptchaHint();
+  const frame = $('#captchaFrame');
+  try {
+    frame?.contentWindow?.postMessage({ source: 'esmeringhoy-iframe', type: 'reset' }, captchaOrigin());
+  } catch {}
+}
+
+window.addEventListener('message', (event) => {
+  if (event.origin !== captchaOrigin()) return;
+  const data = event.data;
+  if (!data || data.source !== 'esmeringhoy-captcha') return;
+
+  if (data.type === 'token') {
+    captchaToken = String(data.token || '');
+    captchaError = '';
+  } else if (data.type === 'expired') {
+    captchaToken = '';
+    captchaError = 'The check expired — complete it again.';
+  } else if (data.type === 'error') {
+    captchaToken = '';
+    captchaError = 'The verification check could not load.';
+  } else if (data.type === 'disabled') {
+    captchaToken = '';
+    captchaError = '';
+  }
+  renderCaptchaHint();
+});
+
+// Called from the submit handlers. Returns the token, or throws the sentence
+// the form shows — by then the widget is already on screen, so the user is
+// being told what to do rather than being handed a popup.
+async function captchaForSubmit() {
+  await loadCaptchaConfig();
+  if (!captchaCfg.required) return null;
+  mountCaptcha();
+  if (!captchaToken) throw new Error('Complete the verification check above to continue.');
+  const token = captchaToken;
+  resetCaptcha(); // single use: any retry needs a fresh challenge
+  return token;
+}
+
 function renderAuthFields() {
   const isCode = authMode === 'code';
   const isRegister = authMode === 'register';
@@ -3324,6 +3435,7 @@ function renderAuthFields() {
     : (isRegister ? 'Create account' : 'Sign in');
 
   $('#authPass').setAttribute('autocomplete', isRegister ? 'new-password' : 'current-password');
+  mountCaptcha();
 }
 
 function setAuthMode(mode) {
@@ -3331,6 +3443,10 @@ function setAuthMode(mode) {
     codeSent = false;
     codeEmail = '';
     stopResendCountdown();
+    // Every tab gets its own challenge. A token is single use and was issued
+    // for the form it was solved on, so carrying one across a tab switch would
+    // either fail on the server or hand the next form a stale answer.
+    resetCaptcha();
   }
   authMode = mode;
   if (authOpen) setPath(AUTH_PATH[mode] || '/login', { replace: true });
@@ -3361,6 +3477,7 @@ function setUser(user) {
 function showAuth(mode = 'login') {
   disconnectStream();
   authOpen = true;
+  loadCaptchaConfig();
 
   // Arriving from the "no account on this address" email: the address is
   // already known, so the form should not make them retype it.
@@ -3554,7 +3671,8 @@ async function resendCode() {
   btn.textContent = 'Sending…';
 
   try {
-    await invoke('auth_email_start', { email: codeEmail });
+    const captcha = await captchaForSubmit();
+    await invoke('auth_email_start', { email: codeEmail, captcha: captcha || undefined });
 
     authError('');
     $('#hintCode').textContent = `Check ${codeEmail} — a sign-in code, or a link to create an account.`;
@@ -3591,7 +3709,8 @@ async function submitCode() {
     btn.classList.add('is-loading');
     $('#authSubmit .btn-label').textContent = 'Sending…';
     try {
-      await invoke('auth_email_start', { email });
+      const captcha = await captchaForSubmit();
+      await invoke('auth_email_start', { email, captcha: captcha || undefined });
       codeSent = true;
       codeEmail = email;
       authError('');
@@ -3703,15 +3822,18 @@ $('#authForm').addEventListener('submit', async (e) => {
     let user = null;
     let snap = null;
     if (authMode === 'login') {
-      const r = await invoke('auth_sign_in', { username, password });
+      const captcha = await captchaForSubmit();
+      const r = await invoke('auth_sign_in', { username, password, captcha: captcha || undefined });
       user = r?.user || null;
     } else {
+      const captcha = await captchaForSubmit();
       const r = await invoke('auth_register', {
         username,
         password,
         email: $('#authEmail').value.trim() || undefined,
         invite: $('#authInvite').value.trim() || undefined,
         terms: $('#termsAgree').checked,
+        captcha: captcha || undefined,
       });
 
       // The account exists but is not signed in: it stays inert until the
@@ -4370,6 +4492,7 @@ async function boot() {
     API_BASE = await invoke('api_base').catch(() => '');
   } catch {}
   announceUpdateResult();
+  loadCaptchaConfig();
   invoke('update_state').then((state) => renderUpdate(state)).catch(() => {});
   const settings = await loadSettingsState().catch(() => null);
   try {

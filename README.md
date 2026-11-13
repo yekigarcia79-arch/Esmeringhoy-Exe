@@ -27,6 +27,9 @@ native shell with a Rust audio engine and a WebView2 interface.
 
 - **Full library** — search, home picks, your mix, playlists, queue, synced
   lyrics, artist and album pages.
+- **Cloudflare verification** — signing in, creating an account and requesting
+  an email code are gated by a Turnstile challenge, solved inline in the auth
+  panel. The token is checked by the server, never by the app.
 - **Fast, offline-friendly playback** — audio is streamed through the app and
   cached locally, so replays are instant and recent tracks play offline.
 - **Queue pre-downloading** — when the current track has about 40 seconds
@@ -75,6 +78,23 @@ run — choose **More info → Run anyway**.
 Sign in with your Esmeringhoy account (or create one if registration is
 open). Pick a few artists for your mix, or skip them — the app restores
 whatever was playing.
+
+### Verification
+
+Signing in, creating an account and asking for an email sign-in code are
+protected by Cloudflare Turnstile. Entering the code is not.
+
+The widget sits in the auth panel, under the fields. It is not drawn by the
+app: Turnstile is bound to the domains listed on the site key, and the app's
+own document is `http://tauri.localhost`, which no site key can list. So the
+app frames `/captcha` from the site, where the widget is first-party, and
+receives the token over `postMessage`; the CSP names that one origin as the
+only allowed frame source. Switching tabs throws the token away and resets the
+challenge, because a token is issued for one form and can be used once.
+
+The check is enforced by the server, which is the point: a token that is not
+verified there proves nothing. With no `TURNSTILE_SECRET_KEY` configured on
+the backend the widget is not mounted at all and the flow works as before.
 
 ## Using it
 
@@ -168,6 +188,8 @@ unless you tick the "delete application data" box.
 | A track skips when it starts | The stream couldn't be resolved — play it again. If it keeps happening, the track may be region-locked. |
 | No sound | Check the volume in the player bar and the default output device in Windows. |
 | Dynamic Island never appears | It only shows while the cursor is over the top-center of the primary screen, and it can be switched off in the tray menu. |
+| The verification box stays empty | It frames `/captcha` from the backend. Check that the deployment includes that page and that the Turnstile site key lists `esmeringhoy.pages.dev`. |
+| "The verification challenge did not pass" | The token was reused or expired. Complete the check again — each attempt gets a fresh challenge. |
 | Old icon on the shortcut | Windows caches icons — press `F5` on the desktop or sign out and back in. |
 
 ## Development

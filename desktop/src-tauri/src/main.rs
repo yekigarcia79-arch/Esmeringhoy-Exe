@@ -2,6 +2,7 @@
 
 mod api;
 mod cache;
+mod captcha;
 mod commands;
 mod discord;
 mod engine;
@@ -75,6 +76,7 @@ fn main() {
             commands::auth_email_verify,
             commands::auth_restore,
             commands::auth_sign_out,
+            commands::captcha_status,
             commands::engine_load,
             commands::engine_toggle,
             commands::engine_seek,

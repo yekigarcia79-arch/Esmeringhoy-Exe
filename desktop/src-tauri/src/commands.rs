@@ -1,5 +1,6 @@
 use crate::api::ApiClient;
 use crate::cache::TrackCache;
+use crate::captcha;
 use crate::engine::PlayingTrack;
 use crate::keystore;
 use crate::state::AppState;
@@ -58,18 +59,21 @@ pub async fn auth_sign_in(
     state: State<'_, Arc<AppState>>,
     username: String,
     password: String,
+    captcha: Option<String>,
 ) -> Result<Value, String> {
     let username = username.trim().to_string();
     if username.is_empty() || password.is_empty() {
         return Err("Enter a username and password.".into());
     }
+    let mut body = json!({ "username": username, "password": password, "token": true });
+    // The server checks this before it compares the password, so a scripted
+    // login never reaches the hash. Omitted when the check is switched off.
+    if let Some(token) = captcha.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        body["turnstileToken"] = json!(token);
+    }
     let r = state
         .api
-        .call(
-            "POST",
-            "/api/auth/login",
-            Some(json!({ "username": username, "password": password, "token": true })),
-        )
+        .call("POST", "/api/auth/login", Some(body))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -101,6 +105,7 @@ pub async fn auth_register(
     email: Option<String>,
     invite: Option<String>,
     terms: Option<bool>,
+    captcha: Option<String>,
 ) -> Result<Value, String> {
     let username = username.trim().to_string();
     if username.is_empty() || password.is_empty() {
@@ -117,6 +122,12 @@ pub async fn auth_register(
     // so an older server that does not know the field sees no change at all.
     if terms.unwrap_or(false) {
         body["terms"] = json!(true);
+    }
+    // Cloudflare Turnstile. The server verifies it before the account exists;
+    // it is sent only when the challenge produced one, so a server with the
+    // check switched off sees exactly the request it saw before.
+    if let Some(token) = captcha.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        body["turnstileToken"] = json!(token);
     }
 
     let r = state
@@ -161,18 +172,20 @@ pub async fn auth_register(
 pub async fn auth_email_start(
     state: State<'_, Arc<AppState>>,
     email: String,
+    captcha: Option<String>,
 ) -> Result<Value, String> {
     let email = email.trim().to_string();
     if email.is_empty() {
         return Err("Enter your email address.".into());
     }
+    let mut body = json!({ "email": email });
+    // Sending a code is gated by the same Turnstile check as registration.
+    if let Some(token) = captcha.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        body["turnstileToken"] = json!(token);
+    }
     let r = state
         .api
-        .call(
-            "POST",
-            "/api/auth/email/start",
-            Some(json!({ "email": email })),
-        )
+        .call("POST", "/api/auth/email/start", Some(body))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -263,6 +276,15 @@ pub async fn auth_sign_out(state: State<'_, Arc<AppState>>) -> Result<(), String
     sync_discord(&state);
     state.api.set_token(None);
     keystore::delete_token()
+}
+
+/// Whether the server wants a Cloudflare challenge, and which site key to use.
+/// Read by the auth screen before it renders so the widget is only mounted on
+/// the tabs the server actually gates.
+#[tauri::command]
+pub async fn captcha_status(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    let cfg = captcha::config(&state.api).await?;
+    Ok(json!({ "required": cfg.required, "siteKey": cfg.site_key }))
 }
 
 #[tauri::command]
