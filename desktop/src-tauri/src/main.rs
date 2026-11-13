@@ -5,10 +5,12 @@ mod cache;
 mod commands;
 mod discord;
 mod engine;
+mod island;
 mod keystore;
 mod preload;
 mod state;
 mod tray;
+mod updater;
 mod youtube;
 
 use state::AppState;
@@ -27,6 +29,9 @@ fn main() {
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             let app_state = AppState::new(&data_dir, app.handle()).expect("app state builds");
             app.manage(Arc::new(app_state));
+
+            let updater = updater::Updater::new(&data_dir);
+            app.manage(updater);
 
             // Alt-Tab and the taskbar read the window's own icon, not the
             // executable's resources. Tauri normally copies it across from the
@@ -48,6 +53,10 @@ fn main() {
                     }
                     None => eprintln!("no window icon available"),
                 }
+            }
+
+            if let Err(e) = island::init(app.handle()) {
+                eprintln!("the Dynamic Island overlay is unavailable: {e}");
             }
 
             match tray::init(app.handle()) {
@@ -73,6 +82,9 @@ fn main() {
             commands::engine_stop,
             commands::engine_set_volume,
             commands::engine_state,
+            commands::island_ready,
+            commands::island_pin,
+            commands::island_command,
             commands::cache_clear,
             commands::cache_stats,
             commands::cache_set_limit,
@@ -81,8 +93,13 @@ fn main() {
             commands::cache_preload,
             commands::preload_status,
             commands::app_health,
-            commands::check_update,
-            commands::install_update,
+            updater::check_update,
+            updater::update_state,
+            updater::start_update_download,
+            updater::pause_update,
+            updater::cancel_update,
+            updater::install_update,
+            updater::update_take_result,
             commands::open_url,
             commands::settings_get,
             commands::general_set,

@@ -1218,15 +1218,19 @@ dependencies = [
  "anyhow",
  "discord-rich-presence",
  "futures-util",
+ "hex",
  "keyring",
  "reqwest",
  "rodio",
+ "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

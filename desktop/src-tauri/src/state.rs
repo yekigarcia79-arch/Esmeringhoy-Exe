@@ -41,6 +41,8 @@ pub struct Prefs {
     pub reduce_motion: bool,
     #[serde(default)]
     pub draggable_waveforms: bool,
+    #[serde(default = "default_true")]
+    pub dynamic_island_enabled: bool,
     #[serde(default)]
     pub discord_rpc_enabled: bool,
     #[serde(default = "default_discord_client_id")]
@@ -60,6 +62,7 @@ impl Default for Prefs {
             ambient_artwork: true,
             reduce_motion: false,
             draggable_waveforms: false,
+            dynamic_island_enabled: true,
             discord_rpc_enabled: false,
             discord_client_id: default_discord_client_id(),
             discord_large_image_key: default_logo(),

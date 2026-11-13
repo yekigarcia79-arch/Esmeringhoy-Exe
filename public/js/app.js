@@ -4022,146 +4022,317 @@ $('#cacheLimit').addEventListener('click', async (e) => {
 
 
 const UPDATE_SKIP_KEY = 'esm.skipUpdate';
-let updateInstalling = false;
+const UPDATE_BUSY = new Set(['preparing', 'downloading', 'verifying', 'installing']);
+let updateState = null;
+let lastUpdatePhase = null;
 
-function setUpdateProgress(downloaded, total) {
-  const bytes = Math.max(0, Number(downloaded) || 0);
-  const totalBytes = Math.max(0, Number(total) || 0);
-  const meter = $('#updMeter');
-  const hasTotal = totalBytes > 0;
-  const pct = hasTotal ? Math.min(100, Math.floor((bytes / totalBytes) * 100)) : 0;
-
-  $('#updProgressText').textContent = 'Downloading update…';
-  $('#updProgressPct').textContent = hasTotal ? `${pct}%` : '';
-  setScaleX($('#updProgressBar'), hasTotal ? pct : 0);
-  $('#updProgressDetail').textContent = hasTotal
-    ? `${fmtBytes(bytes)} of ${fmtBytes(totalBytes)}`
-    : `${fmtBytes(bytes)} downloaded`;
-
-  if (meter) {
-    meter.classList.toggle('is-indeterminate', !hasTotal);
-    meter.setAttribute('aria-valuenow', String(pct));
-  }
+function updateErrText(err) {
+  const raw = typeof err === 'string' ? err : err?.message || '';
+  return String(raw).replace(/^Error:\s*/i, '').trim();
 }
 
-function showUpdateProgress() {
-  updateInstalling = true;
-  $('#updProgress').hidden = false;
-  $('#updNotes').hidden = true;
-  $('#updLater').hidden = true;
-  $('#updClose').disabled = true;
-  $('#updNow').disabled = true;
-  $('#updNow').textContent = 'Preparing…';
-  $('#updLead').textContent = 'Downloading the update. Esmeringhoy closes and reopens by itself once it is installed.';
-  $('#updProgressText').textContent = 'Preparing download…';
-  $('#updProgressPct').textContent = '';
-  setScaleX($('#updProgressBar'), 0);
-  $('#updProgressDetail').textContent = '';
-  const meter = $('#updMeter');
-  if (meter) {
-    meter.classList.add('is-indeterminate');
-    meter.setAttribute('aria-valuenow', '0');
-  }
+function fmtRate(bps) {
+  const n = Number(bps) || 0;
+  if (n < 1024) return '';
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB/s`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB/s`;
 }
 
-function failUpdate(err) {
-  updateInstalling = false;
-  const message = String(err?.message || err || 'Update failed').replace(/^Error:\s*/i, '').trim();
-  $('#updProgress').hidden = false;
-  $('#updProgressText').textContent = 'Update failed';
-  $('#updProgressPct').textContent = '';
-  setScaleX($('#updProgressBar'), 0);
-  $('#updProgressDetail').textContent = message || 'The update could not be installed.';
-  const meter = $('#updMeter');
-  if (meter) {
-    meter.classList.remove('is-indeterminate');
-    meter.setAttribute('aria-valuenow', '0');
-  }
-  $('#updLater').hidden = false;
-  $('#updClose').disabled = false;
-  $('#updNow').disabled = false;
-  $('#updNow').textContent = 'Try again';
-  $('#updLead').textContent = 'A newer version is available. Your settings and cached tracks are kept.';
-  toast(message || 'Update failed');
+function fmtEta(secs) {
+  const s = Math.round(Number(secs) || 0);
+  if (s <= 0) return '';
+  if (s < 60) return `${s}s left`;
+  const m = Math.floor(s / 60);
+  const rest = s % 60;
+  return rest ? `${m}m ${rest}s left` : `${m}m left`;
 }
 
-listen('update:progress', (e) => {
-  if (!updateInstalling) return;
-  const payload = e?.payload || {};
-  setUpdateProgress(payload.downloaded, payload.total);
-});
+function cleanNotes(text) {
+  return String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .trim();
+}
 
-async function checkForUpdates(manual = false) {
-  try {
-    const info = await invoke('check_update');
-    if (!info?.available) {
-      if (manual) toast('Esmeringhoy is up to date');
-      return;
+const UPDATE_LABELS = {
+  checking: 'Checking for updates…',
+  preparing: 'Preparing download…',
+  downloading: 'Downloading update…',
+  paused: 'Download paused',
+  verifying: 'Verifying package…',
+  ready: 'Ready to install',
+  installing: 'Installing update…',
+  error: 'Update failed',
+};
+
+const UPDATE_LEADS = {
+  checking: 'Looking for a newer release.',
+  available: 'A newer version is available. Your settings and cached tracks are kept.',
+  preparing: 'Getting the download ready. Your current version keeps working.',
+  downloading: 'Downloading in the background. Your settings and cached tracks are kept.',
+  paused: 'The download is paused. Your partial download is kept.',
+  verifying: 'The download is complete. Checking it before anything is installed.',
+  ready: 'The update is downloaded and verified. Esmeringhoy will close, install, and reopen itself.',
+  installing: 'Esmeringhoy is closing to install the update. It reopens by itself when done.',
+  error: 'The update could not be completed. Your current version keeps running.',
+};
+
+function renderUpdate(state) {
+  if (!state || !state.phase) return;
+  updateState = state;
+  const phase = state.phase;
+  const info = state.info || null;
+  const total = Math.max(0, Number(state.total) || 0);
+  const downloaded = Math.max(0, Number(state.downloaded) || 0);
+  const rawPct = state.percent === null || state.percent === undefined ? null : Number(state.percent);
+  const pct = rawPct === null || Number.isNaN(rawPct) ? null : Math.max(0, Math.min(100, Math.round(rawPct)));
+  const complete = phase === 'ready' || phase === 'installing';
+
+  $('#updCurrent').textContent = `v${state.currentVersion || ''}`;
+  $('#updVersion').textContent = info ? `v${info.version || ''}` : '';
+  $('#updVersions').hidden = !info;
+
+  const notes = info ? cleanNotes(info.notes) : '';
+  $('#updNotes').textContent = notes.slice(0, 900);
+  $('#updNotes').hidden = !notes || phase !== 'available';
+
+  const showProgress = Boolean(info) && (
+    phase === 'preparing' || phase === 'downloading' || phase === 'paused'
+    || phase === 'verifying' || phase === 'ready' || phase === 'installing' || phase === 'error'
+  );
+  const progress = $('#updProgress');
+  const meter = $('#updMeter');
+  progress.hidden = !showProgress;
+  progress.classList.toggle('is-live', phase === 'preparing' || phase === 'downloading' || phase === 'verifying' || phase === 'installing');
+  progress.classList.toggle('is-error', phase === 'error');
+  progress.classList.toggle('is-done', phase === 'ready');
+
+  const indeterminate = showProgress && phase === 'preparing'
+    ? true
+    : showProgress && !complete && phase !== 'error' && pct === null;
+
+  $('#updProgressText').textContent = UPDATE_LABELS[phase] || '';
+  $('#updProgressPct').textContent = phase === 'error'
+    ? ''
+    : complete
+      ? '100%'
+      : indeterminate || phase === 'preparing'
+        ? ''
+        : pct === null ? '' : `${pct}%`;
+
+  setScaleX($('#updProgressBar'), complete ? 100 : phase === 'error' || indeterminate || pct === null ? 0 : pct);
+  meter.classList.toggle('is-indeterminate', indeterminate);
+  if (indeterminate) meter.removeAttribute('aria-valuenow');
+  else meter.setAttribute('aria-valuenow', String(complete ? 100 : pct === null ? 0 : pct));
+  meter.setAttribute('aria-valuetext', complete
+    ? 'Update verified'
+    : pct === null ? UPDATE_LABELS[phase] || 'Downloading' : `${UPDATE_LABELS[phase] || 'Downloading'}, ${pct}%`);
+
+  const detail = $('#updProgressDetail');
+  const rate = $('#updProgressRate');
+  const hint = $('#updHint');
+  hint.hidden = true;
+  hint.textContent = '';
+  rate.textContent = '';
+
+  if (phase === 'preparing') {
+    detail.textContent = total > 0 ? `Package size ${fmtBytes(total)}` : 'Contacting the release server…';
+    hint.textContent = 'Checking free disk space before starting.';
+    hint.hidden = false;
+  } else if (phase === 'downloading') {
+    detail.textContent = total > 0 ? `${fmtBytes(downloaded)} of ${fmtBytes(total)}` : `${fmtBytes(downloaded)} downloaded`;
+    rate.textContent = [fmtRate(state.bytesPerSec), fmtEta(state.etaSecs)].filter(Boolean).join(' · ');
+  } else if (phase === 'paused') {
+    detail.textContent = `${fmtBytes(downloaded)} of ${fmtBytes(total)}`;
+    hint.textContent = 'Resume continues from the bytes already saved — nothing restarts from zero.';
+    hint.hidden = false;
+  } else if (phase === 'verifying') {
+    detail.textContent = `${fmtBytes(downloaded || total)} downloaded`;
+    rate.textContent = 'SHA-256';
+    hint.textContent = 'Comparing the package against the release digest. Installation stays blocked until it matches.';
+    hint.hidden = false;
+  } else if (phase === 'ready') {
+    detail.textContent = `${fmtBytes(total)} · SHA-256 match`;
+    rate.textContent = state.signature === 'authenticode' ? 'Signed' : state.signature === 'unsigned' ? 'Unsigned' : '';
+    if (state.signature === 'unsigned') {
+      hint.textContent = 'This release is not Authenticode-signed. The SHA-256 digest published with the GitHub release matched exactly.';
+      hint.hidden = false;
     }
-    if (!manual && sessionStorage.getItem(UPDATE_SKIP_KEY) === info.version) return;
-    showUpdate(info);
-  } catch {
-    if (manual) toast('Could not check for updates');
+  } else if (phase === 'installing') {
+    detail.textContent = 'Closing and running the installer…';
+    hint.textContent = 'Esmeringhoy reopens by itself when the installation finishes.';
+    hint.hidden = false;
+  } else if (phase === 'error') {
+    detail.textContent = state.error || 'The update could not be completed.';
+    hint.textContent = 'Nothing was installed. Try again — a partial download resumes from where it stopped.';
+    hint.hidden = false;
   }
+
+  const now = $('#updNow');
+  const pauseBtn = $('#updPause');
+  const cancelBtn = $('#updCancel');
+  const laterBtn = $('#updLater');
+  now.disabled = false;
+  pauseBtn.disabled = false;
+
+  if (phase === 'downloading') {
+    now.hidden = true;
+    pauseBtn.hidden = false;
+    pauseBtn.textContent = 'Pause';
+    cancelBtn.hidden = false;
+  } else if (phase === 'preparing') {
+    now.hidden = true;
+    pauseBtn.hidden = true;
+    cancelBtn.hidden = false;
+  } else if (phase === 'paused') {
+    now.hidden = false;
+    now.textContent = 'Resume download';
+    pauseBtn.hidden = true;
+    cancelBtn.hidden = false;
+  } else if (phase === 'verifying') {
+    now.hidden = true;
+    pauseBtn.hidden = true;
+    cancelBtn.hidden = true;
+  } else if (phase === 'installing') {
+    now.hidden = true;
+    pauseBtn.hidden = true;
+    cancelBtn.hidden = true;
+  } else if (phase === 'ready') {
+    now.hidden = false;
+    now.textContent = state.canInstall ? 'Install & restart' : 'Open release page';
+    pauseBtn.hidden = true;
+    cancelBtn.hidden = true;
+  } else if (phase === 'error') {
+    now.hidden = false;
+    now.textContent = 'Try again';
+    pauseBtn.hidden = true;
+    cancelBtn.hidden = true;
+  } else if (phase === 'checking') {
+    now.hidden = false;
+    now.textContent = 'Checking…';
+    now.disabled = true;
+    pauseBtn.hidden = true;
+    cancelBtn.hidden = true;
+  } else if (phase === 'available') {
+    now.hidden = false;
+    now.textContent = state.canInstall ? 'Download update' : 'Open release page';
+    pauseBtn.hidden = true;
+    cancelBtn.hidden = true;
+  } else {
+    now.hidden = true;
+    pauseBtn.hidden = true;
+    cancelBtn.hidden = true;
+  }
+
+  laterBtn.hidden = UPDATE_BUSY.has(phase) || phase === 'checking';
+  laterBtn.textContent = phase === 'error' ? 'Close' : 'Later';
+  $('#updClose').disabled = phase === 'installing';
+  if (UPDATE_LEADS[phase]) $('#updLead').textContent = UPDATE_LEADS[phase];
 }
 
-function showUpdate(info) {
-  updateInstalling = false;
-  $('#updVersion').textContent = info.version || '';
-  const notes = (info.notes || '').trim();
-  const box = $('#updNotes');
-  box.textContent = notes.slice(0, 800);
-  box.hidden = !notes;
-  const now = $('#updNow');
-  now.dataset.url = info.url || '';
-  now.dataset.install = info.canInstall ? '1' : '';
-  now.textContent = info.canInstall ? 'Update & restart' : 'Open download page';
-  $('#updClose').disabled = false;
-  $('#updLater').hidden = false;
-  $('#updProgress').hidden = true;
-  $('#updLead').textContent = 'A newer version is available. Your settings and cached tracks are kept.';
+function openUpdateModal() {
   $('#updModal').hidden = false;
 }
 
-function closeUpdate() {
-  if (updateInstalling) {
-    toast('Update is in progress — please wait');
+async function checkForUpdates(manual = false) {
+  if (updateState && UPDATE_BUSY.has(updateState.phase)) {
+    if (manual) toast('An update is already in progress');
     return;
   }
+  try {
+    const state = await invoke('check_update', { force: Boolean(manual) });
+    renderUpdate(state);
+    if (state?.available && state.info) {
+      const version = state.info.version || '';
+      if (manual || sessionStorage.getItem(UPDATE_SKIP_KEY) !== version) openUpdateModal();
+    } else if (manual) {
+      toast(`Esmeringhoy ${state?.currentVersion || ''} is up to date`);
+    }
+  } catch (err) {
+    if (manual) toast(updateErrText(err) || 'Could not check for updates');
+  }
+}
+
+function closeUpdate() {
+  if (updateState?.phase === 'installing') return;
   $('#updModal').hidden = true;
 }
+
+listen('update:state', (event) => {
+  const state = event?.payload;
+  if (!state || !state.phase) return;
+  const previous = lastUpdatePhase;
+  lastUpdatePhase = state.phase;
+  renderUpdate(state);
+  if (state.phase === 'ready' && previous !== 'ready' && $('#updModal').hidden) {
+    openUpdateModal();
+    toast(`Esmeringhoy ${state.info?.version ? `v${state.info.version}` : 'update'} is verified and ready to install`);
+  } else if (state.phase === 'error' && previous !== 'error' && $('#updModal').hidden) {
+    toast(state.error || 'The update failed');
+  }
+});
 
 $('#updClose').addEventListener('click', closeUpdate);
 $('#updBackdrop').addEventListener('click', closeUpdate);
 $('#updLater').addEventListener('click', () => {
-  sessionStorage.setItem(UPDATE_SKIP_KEY, $('#updVersion').textContent || '');
+  if (updateState?.phase === 'available' && updateState.info) {
+    sessionStorage.setItem(UPDATE_SKIP_KEY, updateState.info.version || '');
+  }
   closeUpdate();
 });
 $('#updNow').addEventListener('click', async () => {
-  const btn = $('#updNow');
-  const url = btn.dataset.url;
-  if (!url) return;
-  if (btn.dataset.install) {
-    showUpdateProgress();
-    try {
-      await invoke('install_update', { url });
-      $('#updProgressText').textContent = 'Update downloaded';
-      $('#updProgressPct').textContent = '100%';
-      setScaleX($('#updProgressBar'), 100);
-      $('#updProgressDetail').textContent = 'Starting the installer…';
-      $('#updNow').textContent = 'Installing…';
-    } catch (err) {
-      failUpdate(err);
+  const phase = updateState?.phase;
+  try {
+    if (!updateState?.canInstall && (phase === 'available' || phase === 'ready')) {
+      const url = updateState?.info?.htmlUrl;
+      if (url) await invoke('open_url', { url });
+      return;
     }
-    return;
+    if (phase === 'ready') await invoke('install_update');
+    else if (phase === 'available' || phase === 'paused' || phase === 'error') await invoke('start_update_download');
+  } catch (err) {
+    toast(updateErrText(err) || 'The update could not be started');
   }
-  try { await invoke('open_url', { url }); } catch {}
+});
+$('#updPause').addEventListener('click', async () => {
+  try {
+    if (updateState?.phase === 'paused') await invoke('start_update_download');
+    else await invoke('pause_update');
+  } catch (err) {
+    toast(updateErrText(err) || 'The download could not be paused');
+  }
+});
+$('#updCancel').addEventListener('click', async () => {
+  try {
+    await invoke('cancel_update');
+    toast('Update download cancelled');
+  } catch (err) {
+    toast(updateErrText(err) || 'The download could not be cancelled');
+  }
 });
 
 async function refreshVersion() {
   try {
     const h = await invoke('app_health');
     $('#setVersion').textContent = `Esmeringhoy ${h?.version || ''}`;
+  } catch {}
+}
+
+async function announceUpdateResult() {
+  try {
+    const result = await invoke('update_take_result');
+    if (!result) return;
+    if (result.status === 'installed') {
+      toast(`Esmeringhoy updated to v${result.version}`);
+      refreshVersion();
+    } else if (result.status === 'failed') {
+      const why = result.code && result.code !== 'timeout'
+        ? `installer exit code ${result.code}`
+        : 'the installer did not finish';
+      toast(`The update to v${result.version} did not complete (${why})`);
+    }
   } catch {}
 }
 
@@ -4198,6 +4369,8 @@ async function boot() {
   try {
     API_BASE = await invoke('api_base').catch(() => '');
   } catch {}
+  announceUpdateResult();
+  invoke('update_state').then((state) => renderUpdate(state)).catch(() => {});
   const settings = await loadSettingsState().catch(() => null);
   try {
     await runGate();

@@ -119,13 +119,23 @@ Everything the app writes lives in `%LOCALAPPDATA%\dev.esmeringhoy.desktop`:
 ```
 settings.json    volume, cache limit, presence settings
 cache\           one .m4a (AAC) per track, plus index.json
+updates\         downloaded setup packages while an update is in progress
 web.log          interface errors, capped
 ```
 
 ## Updating
 
-Run the newer installer over the installed version. Settings and cache are
-kept — they live outside the program files. Use the new setup rather than
+Open **Settings → General → Check for updates**, or wait for the automatic
+check a few seconds after launch. Esmeringhoy downloads the new setup into
+`updates\` in the app data folder, verifies it against the SHA-256 digest
+published with the GitHub release, installs it silently, and reopens.
+Downloads can be paused and resumed, and a partial file continues from the
+bytes already saved.
+
+Releases are not Authenticode-signed yet; the update sheet says so and shows
+the SHA-256 check instead. Settings and cached tracks are kept throughout.
+
+You can still run a newer setup by hand. Use the new setup rather than
 replacing the `.exe` by hand, so the version in **Settings → Apps →
 Esmeringhoy** stays correct.
 

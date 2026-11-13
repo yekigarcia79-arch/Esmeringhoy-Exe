@@ -3,14 +3,11 @@ use crate::cache::TrackCache;
 use crate::engine::PlayingTrack;
 use crate::keystore;
 use crate::state::AppState;
-use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::Arc;
-use std::os::windows::process::CommandExt;
 use std::path::Path;
-use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 use rodio::Source;
 
@@ -398,6 +395,37 @@ pub fn engine_stop(state: State<'_, Arc<AppState>>) {
 }
 
 #[tauri::command]
+pub fn island_ready(island: State<'_, crate::island::IslandState>) {
+    island.mark_ready();
+}
+
+#[tauri::command]
+pub fn island_pin(island: State<'_, crate::island::IslandState>, pinned: bool) {
+    island.set_pinned(pinned);
+}
+
+#[tauri::command]
+pub async fn island_command(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    cmd: String,
+) -> Result<(), String> {
+    if state.api.token().is_none() {
+        return Err("Sign in to control playback.".into());
+    }
+    let body = match cmd.as_str() {
+        "prev" => json!({ "cmd": "prev" }),
+        "next" => {
+            let view = state.engine.state();
+            json!({ "cmd": "next", "pos": view.pos, "dur": view.duration })
+        }
+        "togglePlay" => json!({ "cmd": "togglePlay" }),
+        _ => return Err("unknown island command".into()),
+    };
+    crate::tray::apply_command(&app, state.inner(), body).await
+}
+
+#[tauri::command]
 pub fn settings_get(state: State<'_, Arc<AppState>>) -> Value {
     settings_json(&state)
 }
@@ -720,244 +748,6 @@ async fn download_one_track(
             emit("failed");
         }
     }
-}
-
-const UPDATE_REPO: &str = "yekigarcia79-arch/Esmeringhoy-Exe";
-
-fn version_tuple(v: &str) -> [u64; 3] {
-    let mut out = [0u64; 3];
-    for (i, part) in v.trim_start_matches('v').split('.').take(3).enumerate() {
-        out[i] = part.parse().unwrap_or(0);
-    }
-    out
-}
-
-fn is_newer(remote: &str, local: &str) -> bool {
-    version_tuple(remote) > version_tuple(local)
-}
-
-fn can_self_update() -> bool {
-    let exe = std::env::current_exe().unwrap_or_default();
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    if local.is_empty() {
-        return false;
-    }
-    let exe = exe.to_string_lossy().to_lowercase();
-    let want = format!("{}\\esmeringhoy\\", local.to_lowercase());
-    exe.starts_with(&want)
-}
-
-const UPDATE_DOWNLOAD_PREFIX: &str =
-    "https://github.com/yekigarcia79-arch/Esmeringhoy-Exe/releases/download/";
-const UPDATE_EMIT_MS: u64 = 100;
-
-fn is_update_url(url: &str) -> bool {
-    fn path_segment(segment: &str) -> bool {
-        !segment.is_empty()
-            && segment != "." && segment != ".."
-            && segment.chars().all(|c| {
-                c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
-            })
-    }
-
-    if url.len() > 2048
-        || !url.starts_with(UPDATE_DOWNLOAD_PREFIX)
-        || url.contains(['?', '#', '"', '<', '>', ' '])
-    {
-        return false;
-    }
-
-    let path = &url[UPDATE_DOWNLOAD_PREFIX.len()..];
-    let segments: Vec<&str> = path.split('/').collect();
-    if segments.len() < 2 || segments.iter().any(|segment| !path_segment(segment)) {
-        return false;
-    }
-    segments
-        .last()
-        .map(|asset| asset.to_ascii_lowercase().ends_with("-setup.exe"))
-        .unwrap_or(false)
-}
-
-fn valid_update_path(path: &std::path::Path) -> bool {
-    let s = path.as_os_str().to_string_lossy();
-    !s.is_empty()
-        && !s.contains(['%', '"', '\r', '\n'])
-        && !s.contains("!")
-}
-
-fn emit_update_progress(app: &AppHandle, downloaded: u64, total: Option<u64>) {
-    let percent = total
-        .filter(|total| *total > 0)
-        .map(|total| ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 100.0).floor());
-    let _ = app.emit(
-        "update:progress",
-        json!({
-            "downloaded": downloaded,
-            "total": total,
-            "percent": percent,
-        }),
-    );
-}
-
-async fn download_update(
-    app: &AppHandle,
-    url: &str,
-    dest: &Path,
-) -> Result<u64, String> {
-    use tokio::io::AsyncWriteExt;
-
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("Esmeringhoy-Desktop/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let res = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("update download failed: {e}"))?;
-    if !res.status().is_success() {
-        return Err(format!("update download failed: HTTP {}", res.status()));
-    }
-
-    let total = res.content_length();
-    emit_update_progress(app, 0, total);
-
-    let mut file = tokio::fs::File::create(dest)
-        .await
-        .map_err(|e| format!("could not create the update file: {e}"))?;
-    let mut stream = res.bytes_stream();
-    let mut downloaded = 0u64;
-    let mut last_emit = std::time::Instant::now();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("update download stream broke: {e}"))?;
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| format!("could not write the update file: {e}"))?;
-        downloaded += chunk.len() as u64;
-
-        let at_total = total.is_some_and(|t| downloaded >= t);
-        if last_emit.elapsed() >= Duration::from_millis(UPDATE_EMIT_MS) || at_total {
-            emit_update_progress(app, downloaded, total);
-            last_emit = std::time::Instant::now();
-        }
-    }
-
-    file.flush().await.map_err(|e| format!("could not flush the update file: {e}"))?;
-    file.sync_all().await.map_err(|e| format!("could not sync the update file: {e}"))?;
-    emit_update_progress(app, downloaded, total);
-    Ok(downloaded)
-}
-
-#[tauri::command]
-pub async fn check_update() -> Result<Value, String> {
-    let client = reqwest::Client::builder()
-        .user_agent("Esmeringhoy-Desktop")
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let res = client
-        .get(format!("https://api.github.com/repos/{UPDATE_REPO}/releases/latest"))
-        .header("accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if res.status() == 404 {
-        return Ok(json!({ "available": false }));
-    }
-    if !res.status().is_success() {
-        return Err(format!("GitHub answered HTTP {}", res.status()));
-    }
-    let body: Value = res.json().await.map_err(|e| e.to_string())?;
-    let tag = body.get("tag_name").and_then(|v| v.as_str()).unwrap_or("");
-    let url = body
-        .get("assets")
-        .and_then(|a| a.as_array())
-        .and_then(|arr| {
-            arr.iter().find(|a| {
-                a.get("name")
-                    .and_then(|n| n.as_str())
-                    .map(|n| n.to_lowercase().ends_with("-setup.exe"))
-                    .unwrap_or(false)
-            })
-        })
-        .and_then(|a| a.get("browser_download_url"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    Ok(json!({
-        "available": !url.is_empty() && is_newer(tag, env!("CARGO_PKG_VERSION")),
-        "version": tag.trim_start_matches('v'),
-        "notes": body.get("body").and_then(|v| v.as_str()).unwrap_or(""),
-        "url": url,
-        "canInstall": can_self_update(),
-    }))
-}
-
-#[tauri::command]
-pub async fn install_update(app: AppHandle, url: String) -> Result<(), String> {
-    if !can_self_update() {
-        return Err("this copy was not installed by the setup".into());
-    }
-    if !is_update_url(&url) {
-        return Err("unexpected update source".into());
-    }
-
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let setup = std::env::temp_dir().join(format!(
-        "Esmeringhoy-update-{}-{stamp}.exe",
-        std::process::id()
-    ));
-    let bat = std::env::temp_dir().join(format!(
-        "esmeringhoy-update-{}-{stamp}.cmd",
-        std::process::id()
-    ));
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-
-    if !valid_update_path(&setup) || !valid_update_path(&exe) || !valid_update_path(&bat) {
-        return Err("the update path cannot be used by the installer script".into());
-    }
-
-    let downloaded = match download_update(&app, &url, &setup).await {
-        Ok(downloaded) => downloaded,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&setup).await;
-            return Err(e);
-        }
-    };
-
-    if downloaded == 0 {
-        let _ = tokio::fs::remove_file(&setup).await;
-        return Err("the update download was empty".into());
-    }
-
-    let script = format!(
-        "@echo off\r\nsetlocal\r\nset /a tries=0\r\n:wait\r\n\
-         tasklist /FI \"IMAGENAME eq Esmeringhoy.exe\" /NH | find /I \"Esmeringhoy.exe\" >nul\r\n\
-         if not errorlevel 1 (\r\n  set /a tries+=1\r\n\
-           if %tries% geq 60 goto install\r\n\
-           ping -n 2 127.0.0.1 >nul\r\n\
-           goto wait\r\n\
-         )\r\n\
-         :install\r\n\
-         \"{}\" /S\r\n\
-         if errorlevel 0 start \"\" \"{}\"\r\n",
-        setup.display(),
-        exe.display()
-    );
-    std::fs::write(&bat, script).map_err(|e| e.to_string())?;
-    std::process::Command::new("cmd")
-        .arg("/C")
-        .arg(&bat)
-        .creation_flags(0x08000000)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    app.exit(0);
-    Ok(())
 }
 
 pub(crate) fn open_https_url(url: &str) -> Result<(), String> {

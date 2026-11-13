@@ -1,5 +1,6 @@
 use crate::commands;
 use crate::engine::player::{PlayingTrack, ERROR_EVENT};
+use crate::island;
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +15,7 @@ const MENU_PLAY_PAUSE: &str = "tray-play-pause";
 const MENU_PREVIOUS: &str = "tray-previous";
 const MENU_NEXT: &str = "tray-next";
 const MENU_DISCORD: &str = "tray-discord";
+const MENU_ISLAND: &str = "tray-island";
 const MENU_LYRICS: &str = "tray-lyrics";
 const MENU_MUTE: &str = "tray-mute";
 const MENU_OPEN: &str = "tray-open";
@@ -30,6 +32,7 @@ struct MenuHandles {
     play_pause: MenuItem<Wry>,
     mute: MenuItem<Wry>,
     discord: CheckMenuItem<Wry>,
+    island: CheckMenuItem<Wry>,
 }
 
 pub struct TrayState {
@@ -149,8 +152,11 @@ fn menu_signature(state: &AppState) -> String {
     let view = state.engine.state();
     let playing = matches!(view.state, "playing" | "loading");
     let muted = view.volume <= 0.001;
-    let discord = state.prefs.lock().unwrap().discord_rpc_enabled;
-    format!("play={playing};mute={muted};discord={discord}")
+    let (discord, island_enabled) = {
+        let prefs = state.prefs.lock().unwrap();
+        (prefs.discord_rpc_enabled, prefs.dynamic_island_enabled)
+    };
+    format!("play={playing};mute={muted};discord={discord};island={island_enabled}")
 }
 
 pub fn sync_menu(app: &AppHandle) {
@@ -190,7 +196,10 @@ fn sync_menu_inner(app: &AppHandle, force: bool) {
 
     let playing = matches!(view.state, "playing" | "loading");
     let muted = view.volume <= 0.001;
-    let discord = state.prefs.lock().unwrap().discord_rpc_enabled;
+    let (discord, island_enabled) = {
+        let prefs = state.prefs.lock().unwrap();
+        (prefs.discord_rpc_enabled, prefs.dynamic_island_enabled)
+    };
     {
         let handles = tray_state.handles.lock().unwrap();
         let Some(handles) = handles.as_ref() else {
@@ -205,6 +214,9 @@ fn sync_menu_inner(app: &AppHandle, force: bool) {
         if let Err(e) = handles.discord.set_checked(discord) {
             eprintln!("[tray] could not update the Discord item: {e}");
         }
+        if let Err(e) = handles.island.set_checked(island_enabled) {
+            eprintln!("[tray] could not update the Dynamic Island item: {e}");
+        }
     }
     *tray_state.signature.lock().unwrap() = signature;
 }
@@ -216,7 +228,10 @@ fn build_menu(
     let view = state.engine.state();
     let playing = matches!(view.state, "playing" | "loading");
     let muted = view.volume <= 0.001;
-    let discord = state.prefs.lock().unwrap().discord_rpc_enabled;
+    let (discord, island_enabled) = {
+        let prefs = state.prefs.lock().unwrap();
+        (prefs.discord_rpc_enabled, prefs.dynamic_island_enabled)
+    };
 
     let play_pause = MenuItem::with_id(
         app,
@@ -233,6 +248,14 @@ fn build_menu(
         "Discord RPC",
         true,
         discord,
+        None::<&str>,
+    )?;
+    let island_item = CheckMenuItem::with_id(
+        app,
+        MENU_ISLAND,
+        "Dynamic Island",
+        true,
+        island_enabled,
         None::<&str>,
     )?;
     let lyrics = MenuItem::with_id(app, MENU_LYRICS, "Show Lyrics", true, None::<&str>)?;
@@ -266,6 +289,7 @@ fn build_menu(
             &next,
             &first_sep,
             &discord,
+            &island_item,
             &lyrics,
             &mute,
             &second_sep,
@@ -282,6 +306,7 @@ fn build_menu(
             play_pause,
             mute,
             discord,
+            island: island_item,
         },
     ))
 }
@@ -320,6 +345,8 @@ fn handle_menu_event(app: &AppHandle, event: &tauri::menu::MenuEvent) {
         spawn_player_command(app, body);
     } else if event.id() == MENU_DISCORD {
         toggle_discord(app);
+    } else if event.id() == MENU_ISLAND {
+        toggle_island(app);
     } else if event.id() == MENU_LYRICS {
         show_main(app);
         let _ = app.emit("tray:lyrics", ());
@@ -359,7 +386,11 @@ fn spawn_player_command(app: &AppHandle, body: Value) {
     });
 }
 
-async fn apply_command(app: &AppHandle, state: &Arc<AppState>, body: Value) -> Result<(), String> {
+pub(crate) async fn apply_command(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    body: Value,
+) -> Result<(), String> {
     let response = state
         .api
         .call("POST", "/api/cmd", Some(body))
@@ -453,6 +484,21 @@ fn toggle_mute(app: &AppHandle) {
     refresh_soon(app);
 }
 
+fn toggle_island(app: &AppHandle) {
+    let Some(state) = app.try_state::<Arc<AppState>>() else {
+        return;
+    };
+    let state = state.inner().clone();
+    let enabled = {
+        let mut prefs = state.prefs.lock().unwrap();
+        prefs.dynamic_island_enabled = !prefs.dynamic_island_enabled;
+        prefs.dynamic_island_enabled
+    };
+    island::set_enabled(app, enabled);
+    let _ = state.save_prefs();
+    refresh_soon(app);
+}
+
 fn toggle_discord(app: &AppHandle) {
     let Some(state) = app.try_state::<Arc<AppState>>() else {
         return;
@@ -482,6 +528,7 @@ pub fn quit(app: &AppHandle) {
         state.engine.stop();
         state.discord.set_enabled(false);
     }
+    island::shutdown(app);
 
     let tray = tray_state.tray.lock().unwrap().take();
     if let Some(tray) = tray {
