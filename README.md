@@ -44,6 +44,13 @@ native shell with a Rust audio engine and a WebView2 interface.
   waveform to seek; its playhead follows playback.
 - **Discord Rich Presence** — show what's playing in your Discord status,
   with the track artwork and a live progress bar.
+- **Dynamic Island** — an always-on-top now-playing pill at the top-center of
+  the screen. It stays hidden until you move the cursor over it, then shows
+  the artwork, a draggable seek bar, previous/play/next and volume. Switch it
+  off from the tray menu; it is on by default.
+- **In-app updates** — checks GitHub Releases shortly after launch, downloads
+  with pause and resume, verifies the package and installs it silently. See
+  [Updating](#updating).
 - **Native window** — frameless, rounded corners, fixed size, fullscreen from
   the title bar.
 
@@ -54,8 +61,8 @@ Download the latest build from
 
 | Installer | Scope | Location |
 |---|---|---|
-| `Esmeringhoy_1.0.0_x64-setup.exe` (NSIS) | Current user, no admin | `%LOCALAPPDATA%\Esmeringhoy` |
-| `Esmeringhoy_1.0.0_x64_en-US.msi` | All users, requires admin | `Program Files\Esmeringhoy` |
+| `Esmeringhoy_1.0.2_x64-setup.exe` (NSIS) | Current user, no admin | `%LOCALAPPDATA%\Esmeringhoy` |
+| `Esmeringhoy_1.0.2_x64_en-US.msi` | All users, requires admin | `Program Files\Esmeringhoy` |
 
 **Requirements:** Windows 10 or 11 (64-bit) and the WebView2 runtime
 (preinstalled on Windows 11; the installer downloads it if missing).
@@ -78,6 +85,11 @@ whatever was playing.
 | Close a dialog | `Esc` |
 | Move the window | Drag anywhere on the title bar |
 | Minimize / fullscreen / close | Title-bar buttons |
+| Show the Dynamic Island | Move the cursor to the top-center of the screen |
+| Open the tray menu | Right-click the tray icon |
+
+The tray menu also controls playback (play/pause, previous, next, mute),
+Discord RPC, the **Dynamic Island**, lyrics, Settings, and quitting the app.
 
 **Settings** (click your username) covers playback, storage and appearance:
 
@@ -104,6 +116,9 @@ whatever was playing.
 ```
 
 - The interface is plain HTML/CSS/JS rendered in WebView2.
+- The Dynamic Island is a second frameless, always-on-top window with no
+  taskbar entry. Rust watches the cursor and reveals it only while you are in
+  its top-center area, with a short grace period while you use its controls.
 - All network calls go through Rust, so your session token never reaches the
   webview; it is stored in Windows Credential Manager.
 - Audio resolves per track and downloads into the cache; downloads are
@@ -152,6 +167,7 @@ unless you tick the "delete application data" box.
 | "Server not reachable" | The backend is down or the connection dropped. The app retries by itself; check [esmeringhoy.pages.dev](https://esmeringhoy.pages.dev). |
 | A track skips when it starts | The stream couldn't be resolved — play it again. If it keeps happening, the track may be region-locked. |
 | No sound | Check the volume in the player bar and the default output device in Windows. |
+| Dynamic Island never appears | It only shows while the cursor is over the top-center of the primary screen, and it can be switched off in the tray menu. |
 | Old icon on the shortcut | Windows caches icons — press `F5` on the desktop or sign out and back in. |
 
 ## Development
